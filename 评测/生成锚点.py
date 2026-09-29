@@ -19,12 +19,12 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'backend'))
+sys.path.insert(0, str(ROOT / '评测'))
 
 from sqlalchemy import select  # noqa: E402
 
@@ -32,8 +32,8 @@ from app.core.postgres import get_session_factory  # noqa: E402
 from app.models.chunk import Chunk  # noqa: E402
 from app.models.document import Document  # noqa: E402
 from app.rag.splitters.legal import chinese_number_to_int  # noqa: E402
+from 评测集 import ANCHOR_COLUMN, load_rows, pick, save_rows  # noqa: E402
 
-EVAL_FILE = ROOT / '评测' / '法规评测集.csv'
 ANCHOR_CHARS = 36
 SEPARATOR = '｜'
 
@@ -112,29 +112,29 @@ def main() -> int:
     with session_factory() as session:
         corpus = load_corpus(session)
 
-    with EVAL_FILE.open(encoding='utf-8', newline='') as handle:
-        rows = list(csv.DictReader(handle))
-        fieldnames = list(rows[0].keys())
+    rows = load_rows()
 
     filled = skipped = failed = 0
     problems: list[str] = []
 
     for row in rows:
-        source = (row['依据文件'] or '').strip()
+        source = pick(row, 'source_file').strip()
         if any(marker in source for marker in NO_ANCHOR_MARKERS) or source in ('', '，'):
             skipped += 1
-            row['锚点原文'] = row['锚点原文'] or '（本题无锚点）'
+            row[ANCHOR_COLUMN] = pick(row, 'anchor') or '（本题无锚点）'
             continue
 
         filenames = [item.strip() for item in source.split(SEPARATOR)]
-        articles = [item.strip() for item in (row['依据条款'] or '').split(SEPARATOR)]
+        articles = [item.strip() for item in pick(row, 'source_article').split(SEPARATOR)]
         # 一行里写了同一份文件的好几个条款（比如"第七条｜第二十三条"）时，
         # 文件列只写一次就够了，不必把同一个文件名抄两遍。
         if len(filenames) == 1 and len(articles) > 1:
             filenames = filenames * len(articles)
         if len(filenames) != len(articles):
             failed += 1
-            problems.append(f"{row['编号']}：文件数（{len(filenames)}）和条款数（{len(articles)}）对不上")
+            problems.append(
+                f"{pick(row, 'code')}：文件数（{len(filenames)}）和条款数（{len(articles)}）对不上"
+            )
             continue
 
         anchors: list[str] = []
@@ -144,16 +144,16 @@ def main() -> int:
             if anchor is None:
                 failed += 1
                 row_ok = False
-                problems.append(f"{row['编号']}：{message}")
+                problems.append(f"{pick(row, 'code')}：{message}")
                 continue
             anchors.append(anchor)
 
         if row_ok:
-            row['锚点原文'] = SEPARATOR.join(anchors)
+            row[ANCHOR_COLUMN] = SEPARATOR.join(anchors)
             filled += 1
-            print(f"✅ {row['编号']:<7} {row['锚点原文'][:64]}")
+            print(f"✅ {pick(row, 'code'):<7} {row[ANCHOR_COLUMN][:56]}")
         else:
-            print(f"❌ {row['编号']:<7} 定位失败")
+            print(f"❌ {pick(row, 'code'):<7} 定位失败")
 
     print()
     print(f'已生成锚点 {filled} 题 ｜ 无锚点（拒答/说明类）{skipped} 题 ｜ 失败 {failed} 题')
@@ -168,12 +168,9 @@ def main() -> int:
         print('演练模式：没有写回文件。确认后加 --apply。')
         return 0 if not problems else 1
 
-    with EVAL_FILE.open('w', encoding='utf-8', newline='') as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    save_rows(rows)
     print()
-    print(f'已写回 {EVAL_FILE}')
+    print('已写回评测集')
     return 0 if not problems else 1
 
 

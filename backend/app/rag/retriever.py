@@ -66,6 +66,9 @@ class RetrievalOutcome:
     log_id: str | None = None
     citation: dict[str, Any] | None = None
     exact_hit_count: int = 0
+    sub_queries: list[str] = field(default_factory=list)
+    covered_lines: list[str] = field(default_factory=list)
+    wiki_entry: dict[str, Any] | None = None
 
 
 def retrieve(
@@ -101,8 +104,13 @@ def retrieve(
 
     # ---- 向量路 ----
     started = time.perf_counter()
+    query_vector: list[float] | None = None
     try:
         vector = embed_query(cleaned)
+        # 留在手里：Wiki 路由要用它做语义匹配。
+        # **复用同一个向量，不额外调一次 embedding**——
+        # 这是"语义匹配不增加成本"能成立的原因。
+        query_vector = vector
         vector_hits = get_vector_store().search(vector=vector, top_k=candidate_k)
     except Exception as exc:  # noqa: BLE001
         # 单路失败不中断整条检索：另一路可能仍然能给出可用结果。
@@ -124,8 +132,65 @@ def retrieve(
     outcome.timings_ms['bm25'] = int((time.perf_counter() - started) * 1000)
     outcome.bm25_hit_count = len(bm25_hits)
 
+    # ---- 查询拆分：只用来**扩大候选池** ----
+    #
+    # 位置很关键：它加的是候选，不改排序。重排仍然用**原问题**，
+    # 因为"这两条业务线有什么区别"这个意图是原问题才有的，
+    # 子查询（"证券 证券和期货…"）反而说不太清。
+    #
+    # 代价也小：只多几次向量化和关键词检索（都是便宜的），
+    # 重排的调用次数**不增加**——候选池大小由 candidate_k 封顶，与原来一致。
+    extra_sources: list[tuple[str, list[dict[str, Any]]]] = []
+    sub_queries: list[str] = []
+    line_pool: dict[str, list[dict[str, Any]]] = {}
+    if settings.query_split_enabled:
+        try:
+            from app.rag.query_split import split_query
+
+            sub_queries = split_query(cleaned)
+        except Exception:  # noqa: BLE001
+            logger.exception('[RETRIEVE] 查询拆分失败，按原问题检索: query=%r', cleaned)
+            sub_queries = []
+
+        for sub_query in sub_queries:
+            label = sub_query.split(' ', 1)[0]
+            started = time.perf_counter()
+            try:
+                sub_vector = embed_query(sub_query)
+                line_vector = get_vector_store().search(vector=sub_vector, top_k=candidate_k)
+                line_bm25 = get_bm25_index().search(sub_query, top_k=candidate_k)
+                extra_sources.append((f'vector·{label}', line_vector))
+                extra_sources.append((f'bm25·{label}', line_bm25))
+                # 单独留一份"这条业务线自己召回了什么"，
+                # 后面要在这份池子里挑一条保底，而不是从融合结果里挑。
+                line_pool[label] = list(line_vector) + list(line_bm25)
+            except Exception:  # noqa: BLE001
+                logger.exception('[RETRIEVE] 子查询检索失败: sub=%r', sub_query)
+            outcome.timings_ms['split'] = outcome.timings_ms.get('split', 0) + int(
+                (time.perf_counter() - started) * 1000
+            )
+
+    outcome.sub_queries = sub_queries
+
+    # ---- Wiki 词条通道 ----
+    #
+    # 走的是"路由"，不是"检索"。命中词条时它**不混进 hits**，
+    # 而是单独挂在 outcome 上——原因是词条不是切片：
+    # 它没有 chunk_id，混进 hits 会让引用还原指向一个不存在的片段。
+    if settings.wiki_enabled and db is not None:
+        try:
+            from app.rag.wiki_route import entry_as_context, match_entry_with_vector
+
+            entry = match_entry_with_vector(db, cleaned, query_vector=query_vector)
+            if entry is not None:
+                outcome.wiki_entry = entry_as_context(entry)
+        except Exception:  # noqa: BLE001
+            logger.exception('[RETRIEVE] Wiki 路由失败，按纯 RAG 继续: query=%r', cleaned)
+
     # ---- 融合 ----
-    fused = reciprocal_rank_fusion(vector_hits, bm25_hits, limit=candidate_k)
+    fused = reciprocal_rank_fusion(
+        vector_hits, bm25_hits, limit=candidate_k, extra=extra_sources
+    )
     outcome.fused_count = len(fused)
 
     # ---- 条款级精确直查 ----
@@ -137,12 +202,59 @@ def retrieve(
         exact_hits = _try_citation_lookup(db, cleaned, outcome)
 
     # ---- 重排 ----
+    #
+    # ⚠️ 这里要**多要一些**，不能直接只要 top_k 条。
+    #
+    # 这是踩过的坑：多样性处理写在了重排之后，但重排只返回 top_k 条，
+    # 于是多样性只能在 5 条里挑 —— 而"被同一份文件挤掉的正确答案"
+    # 往往排在重排的第 6~20 名，**我的代码根本看不到它**。
+    # 实测表现是改前改后数字一模一样（75% vs 75%），
+    # 看起来像"这个改动没用"，实际是"这个改动没生效"。
+    #
+    # 代价几乎为零：重排接口本来就是拿全部候选去打分、再取前 N，
+    # 多返回几条不增加调用量。
+    dense_k = top_k
+    if float(settings.rerank_diversity_penalty or 0.0) > 0:
+        dense_k = max(top_k * 4, top_k + 10)
+
     started = time.perf_counter()
-    final_hits = rerank(cleaned, fused, top_k=top_k)
+    final_hits = rerank(cleaned, fused, top_k=dense_k)
     outcome.timings_ms['rerank'] = int((time.perf_counter() - started) * 1000)
 
     if exact_hits:
         final_hits = _merge_exact_hits(exact_hits, final_hits, top_k=top_k)
+
+    # ---- 每条业务线保底一个位置 ----
+    #
+    # 这是诊断之后改的方向。原来以为"对比类问题的第二个业务线不在候选池里"，
+    # 实测发现候选池里有，**问题在重排**：它给《问答》里泛泛而谈的段落
+    # 0.37 分，给《证券法》第八十八条、《期货和衍生品法》第五十条只有 0.15。
+    #
+    # 这不完全是重排的错——**没有哪一段单独回答了"两者有什么区别"**，
+    # 交叉编码器给"部分相关"打低分是合理的。真正的问题是我们在用
+    # "选最像的一段"的办法，去回答一个"需要两边都在"的问题。
+    #
+    # 所以：让每条业务线各自在自己的候选里挑一条最好的，**保底进结果**。
+    # 重排仍然决定每条线内部谁是第一，只是不再让某一条线整条消失。
+    if line_pool:
+        forced = _line_coverage(
+            sub_queries,
+            line_pool,
+            min_score=float(settings.query_split_min_score or 0.0),
+        )
+        if forced:
+            forced_ids = {str(hit.get('chunk_id')) for hit in forced}
+            final_hits = forced + [
+                hit for hit in final_hits if str(hit.get('chunk_id')) not in forced_ids
+            ]
+            outcome.covered_lines = [hit.get('article_number') for hit in forced]
+
+    final_hits = _diversify(
+        final_hits,
+        top_k=top_k,
+        penalty=float(settings.rerank_diversity_penalty or 0.0),
+        protect=int(settings.rerank_diversity_protect or 0),
+    )
 
     outcome.hits = [_with_effect_labels(hit) for hit in final_hits]
     outcome.exact_hit_count = len(exact_hits)
@@ -210,6 +322,45 @@ def _try_citation_lookup(
     return hits
 
 
+def _line_coverage(
+    sub_queries: list[str],
+    line_pool: dict[str, list[dict[str, Any]]],
+    *,
+    min_score: float,
+) -> list[dict[str, Any]]:
+    """每条业务线各自挑一条最好的，用来保底进入结果。
+
+    关键在于**用子查询去打分，而不是用原问题**：
+    原问题问的是"两者有什么区别"，它对任何一段单独的法条都只能给"部分相关"；
+    而"期货 原问题"这句子查询问的是"期货这一边怎么规定的"，
+    它对期货那一侧的法条能给出正常的判断。
+
+    所以每一条业务线内部的排序仍然交给重排（它擅长这个），
+    只是不再让"跨线比较"这个整体判断去压扁每一条线自己的代表。
+    """
+
+    forced: list[dict[str, Any]] = []
+    for sub_query in sub_queries:
+        label = sub_query.split(' ', 1)[0]
+        pool = line_pool.get(label) or []
+        if not pool:
+            continue
+        picked = rerank(sub_query, pool, top_k=1)
+        if not picked:
+            continue
+        if float(picked[0].get('score') or 0.0) < min_score:
+            # 这条线里也没有像样的东西。硬塞一个不相干的切片，
+            # 只会把它当成"依据"喂给模型——宁可空着。
+            logger.info('[RETRIEVE] %s 线没有达到下限的结果，不保底', label)
+            continue
+        hit = dict(picked[0])
+        hit['retrieval_sources'] = list(hit.get('retrieval_sources') or []) + [
+            f'coverage·{label}'
+        ]
+        forced.append(hit)
+    return forced
+
+
 def _merge_exact_hits(
     exact_hits: list[dict[str, Any]],
     ranked_hits: list[dict[str, Any]],
@@ -242,7 +393,7 @@ def _merge_exact_hits(
 
 
 def _with_effect_labels(hit: dict[str, Any]) -> dict[str, Any]:
-    """给检索结果补上"效力层级 / 效力状态"的中文标签。
+    """给检索结果补上"效力层级 / 效力状态"的中文标签，以及**分数的来源**。
 
     为什么要在这里补，而不是让提示词模块自己翻译：
 
@@ -253,6 +404,18 @@ def _with_effect_labels(hit: dict[str, Any]) -> dict[str, Any]:
     所以：**在把片段交给模型之前，把机器值翻成人话。**
     这是"数据在哪一层就处理好哪一层"的做法——检索层知道层级，
     就别让提示词层去反推。
+
+    顺带补一个 `score_kind`，它解决的是另一件容易出事的事：
+
+        `score` 是一个**混合量纲**的展示字段。重排生效时它是重排分（0~1）；
+        重排不可用时它是融合分（0.01 量级）；只有一路召回时它是
+        BM25 分（10~50 量级）。翻 2026-09-29 欠费期间的日志能直接看到：
+        同一个问题，向量路挂掉之后 `score` 变成了 47.87。
+
+    后果不是显示难看，而是**任何拿 `score` 去跟阈值比的地方都会在故障期间失效**。
+    所以这里把来源显式标出来，判定的地方只认 `rerank`。
+    保留 `score` 不改语义，是因为「检索调试台」在展示它，而展示混合值是合理的——
+    人看到 47.87 会去问"为什么这么高"，代码不会问。
     """
 
     from app.rag.metadata import VALIDITY_LABELS, level_label
@@ -262,7 +425,72 @@ def _with_effect_labels(hit: dict[str, Any]) -> dict[str, Any]:
     enriched['validity_label'] = VALIDITY_LABELS.get(
         str(hit.get('validity') or 'effective'), '效力未知'
     )
+
+    sources = hit.get('retrieval_sources') or []
+    if sources == ['exact']:
+        enriched['score_kind'] = 'exact'
+    elif hit.get('rerank_score') is not None:
+        enriched['score_kind'] = 'rerank'
+    else:
+        # 重排没生效（关掉了、或调用失败退回了原顺序）。
+        # 这时 `score` 是融合分或单路分数，量纲不是阈值标定时用的那个。
+        enriched['score_kind'] = 'fused'
     return enriched
+
+
+def _diversify(
+    hits: list[dict[str, Any]],
+    *,
+    top_k: int,
+    penalty: float,
+    protect: int,
+) -> list[dict[str, Any]]:
+    """让结果里多出现几份不同的文件，而不是被一份文件占满。
+
+    机制：同一份文件已经选过的，再选时**从分数里扣掉一个惩罚量**。
+    惩罚是"每重复一次扣一点"，所以第 2 个同文件切片只扣一点、
+    第 3 个扣两点——**不是一刀切禁止同文件**，而是让"另一份文件里稍微差一点"
+    有机会挤进来。
+
+    为什么前 `protect` 名不动：
+    它们是最强证据，其中往往就有答案所在的那一条。为了多样性去动前两名，
+    等于拿"必然正确的依据"换"可能相关的别的文件"，方向反了。
+    重复带来的问题主要在**尾部**：3~5 名如果全是同一份文件的邻居，
+    边际信息量很低，不如换成另一份相关的文件。
+
+    这条改动同时针对基线里的两个现象：
+
+      · 排头的是《适当性管理办法》问答，把真正的法规条文挤出去（占 14/28）；
+      · "对比两条业务线"的问题，两份需要的文件只来了一份（D7 只有 20%）。
+    """
+
+    if penalty <= 0 or len(hits) <= 1:
+        return hits
+
+    protect = max(0, min(protect, len(hits)))
+    chosen = list(hits[:protect])
+    remaining = list(hits[protect:])
+
+    def key_of(hit: dict[str, Any]) -> str:
+        return str(hit.get('document_id') or hit.get('filename') or '')
+
+    used: dict[str, int] = {}
+    for hit in chosen:
+        used[key_of(hit)] = used.get(key_of(hit), 0) + 1
+
+    while remaining and len(chosen) < top_k:
+        best_index = 0
+        best_value: float | None = None
+        for index, hit in enumerate(remaining):
+            repeated = used.get(key_of(hit), 0)
+            value = float(hit.get('score') or 0.0) - penalty * repeated
+            if best_value is None or value > best_value:
+                best_index, best_value = index, value
+        picked = remaining.pop(best_index)
+        chosen.append(picked)
+        used[key_of(picked)] = used.get(key_of(picked), 0) + 1
+
+    return chosen
 
 
 def reciprocal_rank_fusion(
@@ -270,12 +498,27 @@ def reciprocal_rank_fusion(
     bm25_hits: list[dict[str, Any]],
     *,
     limit: int,
+    extra: list[tuple[str, list[dict[str, Any]]]] | None = None,
 ) -> list[dict[str, Any]]:
-    """按名次融合两路结果。"""
+    """按名次融合多路结果。
+
+    主路是向量和关键词；`extra` 里是**查询拆分**产生的子查询召回
+    （"证券 原问题"、"期货 原问题"各一路）。
+
+    子查询的命名带上业务线（`vector·证券`），这是刻意的：
+    结果里会标出"这一条是拆出来那一路召回的"，出问题时能一眼看出
+    是哪条子查询把无关内容带进来的。
+    """
 
     merged: dict[str, dict[str, Any]] = {}
 
-    for source, hits in (('vector', vector_hits), ('bm25', bm25_hits)):
+    sources: list[tuple[str, list[dict[str, Any]]]] = [
+        ('vector', vector_hits),
+        ('bm25', bm25_hits),
+    ]
+    sources.extend(extra or [])
+
+    for source, hits in sources:
         for rank, hit in enumerate(hits, start=1):
             key = str(hit.get('chunk_id') or f'{source}:{rank}')
             entry = merged.setdefault(
@@ -294,10 +537,12 @@ def reciprocal_rank_fusion(
             if source not in entry['retrieval_sources']:
                 entry['retrieval_sources'].append(source)
 
-            if source == 'vector':
+            # 用 startswith 而不是相等：子查询那几路叫 "vector·证券"，
+            # 它们和主路一样是向量召回，分数该记在同一个字段上。
+            if source.startswith('vector'):
                 entry['rank_vector'] = rank
                 entry['vector_score'] = hit.get('score')
-            else:
+            elif source.startswith('bm25'):
                 entry['rank_bm25'] = rank
                 entry['bm25_score'] = hit.get('score')
 

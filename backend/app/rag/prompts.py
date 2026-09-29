@@ -139,6 +139,7 @@ def build_user_prompt(
     question: str,
     contexts: list[dict],
     history: list[dict] | None = None,
+    wiki: dict | None = None,
 ) -> str:
     """把检索片段和问题拼成用户消息。
 
@@ -159,6 +160,29 @@ def build_user_prompt(
     """
 
     lines: list[str] = []
+
+    if wiki:
+        # 词条单独成块，和【检索片段】并列而不是混进去。
+        # 它是**已编译的跨文档结论**，性质和作用都不一样：
+        # 片段是"从哪一句原文来的"，词条是"这件事的立场是什么"。
+        lines.append('【知识库词条】')
+        lines.append(
+            f'（这是知识库预先编译好的跨文档综合结论，'
+            f'状态：{wiki.get("status")}。它可以作为主要依据，'
+            f'但引用时仍要指出依据的法规与条款。）'
+        )
+        lines.append(f'标题：{wiki.get("title")}')
+        if wiki.get('summary'):
+            lines.append(f'结论：{wiki.get("summary")}')
+        lines.append('正文：')
+        lines.append(str(wiki.get('body') or ''))
+        citations = wiki.get('citations') or []
+        if citations:
+            lines.append(
+                '词条依据：'
+                + '；'.join(f'{c.get("文档")}{c.get("条款")}' for c in citations)
+            )
+        lines.append('')
 
     if history:
         lines.append('【对话历史】')

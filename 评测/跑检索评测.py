@@ -36,11 +36,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'backend'))
+sys.path.insert(0, str(ROOT / '评测'))
+
+# Windows 控制台默认用 GBK 解码输出，而这个脚本要打印 ✅/❌/🙋。
+# 后果不是"显示成乱码"，而是**脚本直接崩在打印那一步**——
+# 前面 100 多题已经跑完、钱已经花了，明细却一条都没落盘。
+# 所以修在这里，而不是要求每个人记得先敲 chcp 65001。
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except Exception:  # noqa: BLE001
+    pass
 
 from app.core.postgres import get_session_factory  # noqa: E402
 from app.services.retrieval_service import RetrievalService  # noqa: E402
+from app.rag.refusal import gate_score  # noqa: E402
+from app.rag.splitters.legal import chinese_number_to_int  # noqa: E402
+from 评测集 import load_rows, pick  # noqa: E402
 
-EVAL_FILE = ROOT / '评测' / '法规评测集.csv'
 REPORT_FILE = ROOT / '评测' / '检索评测报告.md'
 RESULT_FILE = ROOT / '评测' / '检索评测明细.csv'
 
@@ -57,7 +69,24 @@ def normalize(text: str) -> str:
     return re.sub(r'[\s\u3000]+', '', text or '')
 
 
-def judge(expected: str, anchors: list[str], hits: list[dict]) -> tuple[str, str]:
+ARTICLE_NUMBER = re.compile(r'^第([一二三四五六七八九十百零〇\d]+)条')
+
+
+def article_int(text: str) -> int | None:
+    """从"第五十条 期货经营机构……"里取出 50。"""
+
+    match = ARTICLE_NUMBER.match((text or '').strip())
+    if not match:
+        return None
+    return chinese_number_to_int(match.group(1))
+
+
+def judge(
+    expected: str,
+    anchors: list[str],
+    hits: list[dict],
+    wiki_articles: set[int] | None = None,
+) -> tuple[str, str]:
     """返回 (判定, 说明)。判定取值：通过 / 未通过 / 待人工。"""
 
     expected = (expected or '').strip()
@@ -68,12 +97,26 @@ def judge(expected: str, anchors: list[str], hits: list[dict]) -> tuple[str, str
     if not anchors:
         return '待人工', '这一题没有锚点'
 
-    corpus = [normalize(hit.get('text')) for hit in hits]
-    matched = [anchor for anchor in anchors if normalize(anchor) in ''.join(corpus)]
+    corpus = ''.join(normalize(hit.get('text')) for hit in hits)
+    matched = []
+    via_wiki = 0
+    for anchor in anchors:
+        if normalize(anchor) in corpus:
+            matched.append(anchor)
+            continue
+        # 词条是**改写**过的，逐字比对必然对不上。
+        # 所以这里换一个判据：词条的「依据」里有没有列出这一条。
+        # 有，就说明这一条的规则确实被词条覆盖了——
+        # 这正是 Wiki 通道该起的作用。
+        number = article_int(anchor)
+        if number is not None and wiki_articles and number in wiki_articles:
+            matched.append(anchor)
+            via_wiki += 1
 
     need = 2 if '至少两个' in expected else 1
     if len(matched) >= need:
-        return '通过', f'命中 {len(matched)}/{len(anchors)} 个锚点'
+        note = f'命中 {len(matched)}/{len(anchors)} 个锚点'
+        return '通过', f'{note}（其中 {via_wiki} 条经词条覆盖）' if via_wiki else note
     return '未通过', f'只命中 {len(matched)}/{len(anchors)} 个锚点（需要 {need} 个）'
 
 
@@ -83,10 +126,9 @@ def main() -> int:
     parser.add_argument('--only', default=None, help='只跑编号以它开头的题（如 D1）')
     args = parser.parse_args()
 
-    with EVAL_FILE.open(encoding='utf-8', newline='') as handle:
-        rows = list(csv.DictReader(handle))
+    rows = load_rows()
     if args.only:
-        rows = [row for row in rows if row['编号'].startswith(args.only)]
+        rows = [row for row in rows if pick(row, 'code').startswith(args.only)]
 
     results: list[dict] = []
     by_dimension: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -97,26 +139,42 @@ def main() -> int:
         for row in rows:
             anchors = [
                 item.strip()
-                for item in (row['锚点原文'] or '').split(SEPARATOR)
+                for item in pick(row, 'anchor').split(SEPARATOR)
                 if item.strip() and not item.startswith('（')
             ]
-            outcome = service.search(query=row['问题'], top_k=args.top_k, persist=False)
-            verdict, note = judge(row['期望行为'], anchors, outcome.hits)
+            outcome = service.search(query=pick(row, 'question'), top_k=args.top_k, persist=False)
+            wiki_articles = {
+                number for number in (
+                    article_int(str(c.get('条款') or ''))
+                    for c in ((outcome.wiki_entry or {}).get('citations') or [])
+                ) if number is not None
+            }
+            verdict, note = judge(pick(row, 'expected'), anchors, outcome.hits, wiki_articles)
+            # 记下**用于阈值判定的那个分数**（重排分），以及它是否可用。
+            #
+            # 为什么要评测顺手记这个：阈值是在探针的分布上标定出来的，
+            # 而探针是合成样本。**要知道这个阈值会不会误伤真实题目，
+            # 只能拿真实题目跑一遍看分数落在哪。** 少了这一列，
+            # 每次调阈值都得单独再跑一次；有了它，调阈值就是拿现成的表算一下。
+            gate_value, gate_kind = gate_score(outcome.hits)
 
             results.append(
                 {
-                    '编号': row['编号'],
-                    '维度': row['维度'],
-                    '问题': row['问题'],
+                    '编号': pick(row, 'code'),
+                    '维度': pick(row, 'dimension'),
+                    '问题': pick(row, 'question'),
                     '判定': verdict,
                     '说明': note,
                     '条款直查': outcome.exact_hit_count,
+                    '最高重排分': '' if gate_value is None else f'{gate_value:.4f}',
+                    '分数来源': gate_kind,
                     '首条来源': (outcome.hits[0].get('filename') if outcome.hits else ''),
+                    '词条': (outcome.wiki_entry or {}).get('slug') or '',
                 }
             )
-            by_dimension[row['维度']][verdict] += 1
+            by_dimension[pick(row, 'dimension')][verdict] += 1
             mark = {'通过': '✅', '未通过': '❌', '待人工': '🙋'}[verdict]
-            print(f"{mark} {row['编号']:<7} {note[:44]:<46} {row['问题'][:26]}")
+            print(f"{mark} {pick(row, 'code'):<7} {note[:40]:<42} {pick(row, 'question')[:24]}")
 
     print()
     print('=' * 82)

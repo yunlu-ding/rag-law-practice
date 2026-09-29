@@ -45,6 +45,11 @@ class RetrievalHit(BaseModel):
     bm25_score: float | None = None
     fused_score: float | None = None
     rerank_score: float | None = None
+    score_kind: str | None = Field(
+        default=None,
+        description='score 属于哪种分数：exact / rerank / fused。'
+                    'score 是混合量纲的展示字段，判定时只能认 rerank',
+    )
     rank_bm25: int | None = None
     rank_fused: int | None = None
     rank_before_rerank: int | None = None

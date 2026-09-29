@@ -21,9 +21,12 @@ from app.core.vector_store import get_vector_store  # noqa: E402
 
 # 本项目自己的集合。其它集合是同一台 Zilliz 上别的项目的，不要动。
 #
-# 判断依据是**配置里当前用的集合名**加它的历史名字，而不是写死一份名单——
-# 写死名单的问题是：换了集合名之后，旧的会被标成"别的项目"，新的会被标成"不认识"。
-OURS = {'vibe_regulation_knowledge', 'vibe_cfa_knowledge'}
+# 判断依据是**配置里当前用的集合名**（下面 main 里从 settings 取），
+# 而不是写死一份名单——写死名单的问题是：换了集合名之后，
+# 旧的会被标成"别的项目"、新的会被标成"不认识"。
+#
+# 这里只留**本项目历史用过的名字**，用于识别"哪些是我的、可以清"。
+OURS_HISTORY = {'vibe_regulation_knowledge'}
 
 
 def main() -> int:
@@ -35,6 +38,7 @@ def main() -> int:
     print(f'本项目当前使用的集合：{store.collection}')
     print()
 
+    ours = OURS_HISTORY | {store.collection}
     print(f'{"集合名":<26} {"条数":>8}  归属')
     print('-' * 56)
     for name in sorted(client.list_collections()):
@@ -45,7 +49,7 @@ def main() -> int:
             total = int(result[0].get('count(*)', 0)) if result else 0
         except Exception:  # noqa: BLE001
             total = -1
-        owner = '← 本项目' if name in OURS else '别的项目（不要动）'
+        owner = '← 本项目' if name in ours else '别的项目（不要动）'
         print(f'{name:<26} {total:>8}  {owner}')
     return 0
 

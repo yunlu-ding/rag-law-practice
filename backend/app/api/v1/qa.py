@@ -54,6 +54,17 @@ class AskResponse(BaseModel):
     history_turns: int = Field(default=0, description='带入了多少轮历史')
     refused: bool = Field(description='是否走了拒答分支')
     refusal_reason: str | None = None
+    refusal_kind: str | None = Field(
+        default=None,
+        description='拒答种类：retrieval_error / citation_missing / no_hits / low_score',
+    )
+    evidence: str | None = Field(
+        default=None,
+        description='本次回答的依据强度：citation_exact / wiki / rerank / degraded',
+    )
+    evidence_note: str | None = Field(
+        default=None, description='需要一并告诉用户的提醒（降级、词条缺失等）'
+    )
     conclusion: str | None = Field(default=None, description='违反 / 不违反 / 无法判断 / 说明')
     clause: str | None = None
     reasoning: str | None = None
@@ -87,6 +98,9 @@ class QaLogItem(BaseModel):
     unknown_citations: list[str] = Field(default_factory=list)
     refused: bool
     refusal_reason: str | None = None
+    refusal_kind: str | None = None
+    evidence: str | None = None
+    evidence_note: str | None = None
     parse_ok: bool
     retrieval_failed: bool = False
     latency_ms: int | None = None
@@ -140,6 +154,9 @@ def ask(request: AskRequest, db: Session = Depends(get_database)) -> AskResponse
         history_turns=outcome.history_turns,
         refused=outcome.refused,
         refusal_reason=outcome.refusal_reason,
+        refusal_kind=outcome.refusal_kind,
+        evidence=outcome.evidence,
+        evidence_note=outcome.evidence_note,
         conclusion=outcome.conclusion,
         clause=outcome.clause,
         reasoning=outcome.reasoning,

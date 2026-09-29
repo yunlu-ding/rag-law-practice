@@ -19,6 +19,7 @@ from app.rag.prompts import (
     build_rewrite_prompt,
     build_user_prompt,
 )
+from app.rag.refusal import KIND_RETRIEVAL_ERROR, RefusalDecision, decide
 from app.services.retrieval_service import RetrievalService
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,15 @@ class QaOutcome:
     history_turns: int = 0
     refused: bool = False
     refusal_reason: str | None = None
+    # 拒答的种类（retrieval_error / citation_missing / no_hits / low_score）。
+    # 只看 `refused` 这个布尔值，"系统坏了"和"库里确实没有"长得一模一样，
+    # 而这两种情况对用户的行动指向完全相反。
+    refusal_kind: str | None = None
+    # 这次答案的**依据强度**（citation_exact / wiki / rerank / degraded）。
+    # 它回答的是"这个答案有多硬"，和"答没答"是两个问题。
+    evidence: str | None = None
+    # 附在答案旁边的提醒（比如"本次没有重排""这个对比主题还没编译词条"）。
+    evidence_note: str | None = None
     conclusion: str | None = None
     clause: str | None = None
     reasoning: str | None = None
@@ -102,8 +112,8 @@ class QaService:
         # ---- 多轮追问：先把"追问"改写成能独立检索的问题 ----
         #
         # 为什么这一步是多轮的关键：
-        # 用户在追问时几乎不会重复主语。上一轮问「离职后带走客户名单违反准则吗」，
-        # 这一轮只会问「那如果我事先问过客户呢？」——
+        # 用户在追问时几乎不会重复主语。上一轮问「向 65 岁以上客户推销高风险基金要注意什么」，
+        # 这一轮只会问「那如果客户自己坚持要买呢？」——
         # **这种句子直接拿去检索，几乎必然召不回东西**，因为"那如果"没有指向。
         #
         # 所以先做一次改写，把被省略的主语补回来，再用改写后的句子检索。
@@ -142,62 +152,52 @@ class QaService:
         #   系统故障 → 用户该重试，不该误以为资料缺失。
         # 而且这类故障**不报错**，只是答案变了——如果不区分，
         # 它会被当成"模型不稳定"，然后去调一个根本没错的地方。
-        best_score, score_source = _best_score(retrieval.hits)
+        # 判据本身（顺序、每一类的理由、为什么阈值只管混合检索这一条路）
+        # 全都写在 app/rag/refusal.py 里。这里只负责把结论落到 outcome 上——
+        # 把判定和落地分开，是因为判定要被标定工具和检索调试台复用。
+        decision = decide(
+            query=standalone,
+            hits=retrieval.hits,
+            wiki_entry=retrieval.wiki_entry,
+            citation=retrieval.citation,
+            error=retrieval.error,
+            threshold=threshold,
+        )
+        outcome.refusal_kind = decision.kind
+        outcome.evidence = decision.evidence
+        outcome.evidence_note = decision.note
+        outcome.retrieval['refusal'] = {
+            'kind': decision.kind,
+            'evidence': decision.evidence,
+            'score': decision.score,
+            'score_kind': decision.score_kind,
+            'threshold': decision.threshold,
+        }
 
-        if not retrieval.hits and retrieval.error:
-            # 情况一：检索链路故障，而且没有任何可用结果
-            outcome.retrieval_failed = True
-            outcome.error = (
-                f'检索服务暂时不可用，本次没有生成回答。'
-                f'这是系统故障，不代表知识库里没有内容——请稍后重试。'
-                f'（原因：{retrieval.error}）'
-            )
-            outcome.latency_ms = int((time.perf_counter() - started) * 1000)
-            outcome.log_id = self._persist(outcome, threshold)
-            logger.error(
-                '[QA] 检索故障，未生成回答: question=%r error=%s',
-                outcome.question,
-                retrieval.error,
-            )
-            return outcome
-
-        if not retrieval.hits:
-            # 情况二：检索正常，但一条都没召回到。
-            # 这和"分数不够"不一样——分数不够说明有相关内容但不够像；
-            # 一条都没有，说明知识库里确实没有这个主题。
-            outcome.refused = True
-            outcome.refusal_reason = '检索正常执行，但没有召回任何片段'
-            outcome.conclusion = '无法判断'
-            outcome.reasoning = (
-                '没有检索到与这个问题相关的内容，知识库里可能确实没有这个主题的资料。'
-                '可以去「文档管理」确认相关资料是否已经上传入库。'
-            )
-            outcome.latency_ms = int((time.perf_counter() - started) * 1000)
-            outcome.log_id = self._persist(outcome, threshold)
-            logger.info('[QA] 拒答（无召回）: question=%r', outcome.question)
-            return outcome
-
-        if best_score < threshold:
-            # 情况三：召回到了，但相关度不够，按阈值拒答
-            outcome.refused = True
-            outcome.refusal_reason = (
-                f'检索到的内容相关度不足（最高 {best_score:.4f}，'
-                f'阈值 {threshold:.4f}，取自 {score_source}），'
-                f'没有可用依据，因此不作答'
-            )
-            outcome.conclusion = '无法判断'
-            outcome.reasoning = (
-                f'检索到了内容，但相关度不足（最高 {best_score:.4f}，低于阈值 {threshold:.4f}），'
-                f'因此不给出结论。如果你认为资料应该在库里，'
-                f'可以去「检索调试台」看看召回的内容和分数。'
-            )
+        if decision.refuse:
+            if decision.kind == KIND_RETRIEVAL_ERROR:
+                # 系统故障和"知识库里没有"必须分开说。以前混成一句
+                # "没有足够的依据"，结果一次向量化接口欠费，用户被告知
+                # "知识库中没有资料"——而资料明明在，是系统坏了。
+                outcome.retrieval_failed = True
+                outcome.error = (
+                    f'检索服务暂时不可用，本次没有生成回答。'
+                    f'这是系统故障，不代表知识库里没有内容——请稍后重试。'
+                    f'（原因：{retrieval.error}）'
+                )
+            else:
+                outcome.refused = True
+                outcome.refusal_reason = decision.reason
+                outcome.conclusion = '无法判断'
+                outcome.reasoning = _refusal_message(decision)
             outcome.latency_ms = int((time.perf_counter() - started) * 1000)
             outcome.log_id = self._persist(outcome, threshold)
             logger.info(
-                '[QA] 拒答（分数不足）: question=%r best=%.4f threshold=%.4f',
+                '[QA] 拒答: kind=%s question=%r score=%s threshold=%s',
+                decision.kind,
                 outcome.question,
-                best_score,
-                threshold,
+                decision.score,
+                decision.threshold,
             )
             return outcome
 
@@ -223,6 +223,7 @@ class QaService:
         user_prompt = build_user_prompt(
             question=outcome.question,
             contexts=contexts,
+            wiki=retrieval.wiki_entry,
             history=history,
         )
 
@@ -357,7 +358,10 @@ class QaService:
                 unknown_citations=outcome.unknown_citations,
                 refused=outcome.refused,
                 refusal_reason=outcome.refusal_reason,
+                refusal_kind=outcome.refusal_kind,
                 refusal_threshold=threshold,
+                evidence=outcome.evidence,
+                evidence_note=outcome.evidence_note,
                 retrieval_failed=outcome.retrieval_failed,
                 parse_ok=outcome.parse_ok,
                 model=get_settings().model,
@@ -374,43 +378,40 @@ class QaService:
             return None
 
 
-def _best_score(hits: list[dict[str, Any]]) -> tuple[float, str]:
-    """取本次检索的"最高相关度"，并说明它来自哪个分数。
+def _refusal_message(decision: RefusalDecision) -> str:
+    """把拒答结论翻成用户看得懂、并且**能据此行动**的一段话。
 
-    为什么要区分来源：
-    重排分是 0~1 的相关性分数，语义清晰、适合做阈值；
-    但重排可能被关闭或调用失败（那时会退回原顺序），
-    此时分数就变成了向量余弦相似度。
-    **阈值必须知道自己是在对哪种分数做判断**，
-    否则会出现"换了配置之后拒答行为莫名其妙变了"这种问题。
+    每一种拒答都要回答同一个问题：**"我现在该做什么？"**
 
-    ⚠️ 条款**精确命中**要单独处理，而且必须放在最前面判断。
+        · 库里没有这一条   → 去补这部法规（问的是具体条号，答案是确定的）
+        · 一条都没召回     → 确认资料有没有入库
+        · 分数不足         → 换个问法，或去检索调试台看召回了什么
+        · 系统故障         → 稍后重试，**不要去补资料**
 
-    精确命中是从关系库按（法规名 + 条号）取出来的，它**没有相似度分数**——
-    三项分数全是 None。如果不特判，循环里会走到 `fused_score or 0.0`，
-    于是"用户指名要的那一条已经拿到手了"反而被判成 0 分，
-    低于阈值、直接拒答。这是个自己给自己挖的坑。
+    以前这四种共用一句话"相关度不足"，等于给用户的行动指引是错的。
 
-    返回 1.0 不是编一个相似度，而是表达"这一类证据的确定性与相似度不是一回事"：
-    用户问第几条、我们就找到了第几条，这里面没有"像不像"的成分，
-    不该再让它去和阈值比大小。
+    ⚠️ 这里**不再出现具体分数**。分数是维护者用来标定阈值的，
+    不是给用户看的：告诉用户"最高 0.3243 低于阈值 0.5"，
+    他既无法核对，也无法行动。分数写进日志和调试台就够了。
     """
 
-    if any('exact' in (hit.get('retrieval_sources') or []) for hit in hits):
-        return 1.0, 'exact'
-
-    best = -1.0
-    source = 'none'
-    for hit in hits:
-        if hit.get('rerank_score') is not None:
-            value, label = float(hit['rerank_score']), 'rerank'
-        elif hit.get('vector_score') is not None:
-            value, label = float(hit['vector_score']), 'vector'
-        else:
-            value, label = float(hit.get('fused_score') or 0.0), 'fused'
-        if value > best:
-            best, source = value, label
-    return (best if best >= 0 else 0.0), source
+    if decision.kind == KIND_CITATION_MISSING:
+        return (
+            f'{decision.reason} '
+            f'如果你认为这部法规应该包含这一条，可以核对一下版本；'
+            f'也可以去「文档管理」确认这部法规是否已经入库。'
+        )
+    if decision.kind == 'no_hits':
+        return (
+            '没有检索到与这个问题相关的内容，知识库里可能确实没有这个主题的资料。'
+            '可以去「文档管理」确认相关资料是否已经上传入库。'
+        )
+    if decision.kind == 'low_score':
+        return (
+            '检索到了内容，但相关度不足，因此不给出结论。'
+            '如果你认为资料应该在库里，可以去「检索调试台」看看召回的内容。'
+        )
+    return decision.reason or '本次没有给出结论。'
 
 
 def _parse_json(raw: str) -> tuple[dict[str, Any], bool]:

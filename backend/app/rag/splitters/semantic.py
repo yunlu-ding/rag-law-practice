@@ -116,7 +116,8 @@ def _iter_units(text: str) -> list[tuple[int, int, bool]]:
             else:
                 # 连续的多行：把它当成一个"多行标题"并进同一个单元。
                 # 为什么要这样处理：PDF 提取出来的标题经常被排版拆成好几行，
-                # 例如 "CODE OF ETHICS" / "AND STANDARDS OF" / "PROFESSIONAL CONDUCT"，
+                # 例如一份自律规则的标题被拆成
+                # "证券期货投资者适当性" / "管理办法实施" / "细则"，
                 # 按行切会得到三个十几字的碎片。
                 unit_is_strong = unit_is_strong or (level == 'strong')
         elif line.strip():

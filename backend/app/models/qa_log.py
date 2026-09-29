@@ -62,6 +62,21 @@ class QaLog(Base, TimestampMixin):
     refusal_threshold: Mapped[float | None] = mapped_column(
         nullable=True, comment='本次生效的拒答阈值，便于复现'
     )
+    # 下面两列是"这一次回答凭什么"的证据，和 refused 那个布尔值是两件事：
+    #   refusal_kind —— 拒答属于哪一类（系统故障 / 库里没有这一条 /
+    #                   一条都没召回 / 分数不足）。混在一起的话，
+    #                   "拒答率"这个数字里会同时装着"系统坏了"和"真的没有"。
+    #   evidence     —— 答了的话，依据有多硬（条款直查 / 词条 / 重排分达标 /
+    #                   降级模式）。它让"可信回答率"可以按证据强度拆开看。
+    refusal_kind: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, comment='拒答种类，便于按原因分组统计'
+    )
+    evidence: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, comment='本次回答的依据强度'
+    )
+    evidence_note: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment='附在答案旁的提醒（降级 / 词条缺失）'
+    )
 
     parse_ok: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False, comment='模型输出是否被成功解析为结构化结果'

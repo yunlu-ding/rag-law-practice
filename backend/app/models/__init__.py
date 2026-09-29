@@ -11,5 +11,15 @@ from app.models.document import Document
 from app.models.qa_log import QaLog
 from app.models.retrieval_log import RetrievalLog
 from app.models.usage import UsageDaily
+from app.models.wiki_entry import WikiEntry
 
-__all__ = ['Base', 'TimestampMixin', 'Document', 'Chunk', 'RetrievalLog', 'QaLog', 'UsageDaily']
+__all__ = [
+    'Base',
+    'TimestampMixin',
+    'Document',
+    'Chunk',
+    'RetrievalLog',
+    'QaLog',
+    'UsageDaily',
+    'WikiEntry',
+]

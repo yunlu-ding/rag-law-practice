@@ -9,7 +9,7 @@
 #      部署后一定执行 systemctl status vibe-rag 确认它是 active。
 
 [Unit]
-Description=CFA 智能备考知识库
+Description=金融监管法规知识库
 After=network.target postgresql.service
 Wants=postgresql.service
 

@@ -113,6 +113,10 @@ def _shrink(hit: dict[str, Any]) -> dict[str, Any]:
         'bm25_score': hit.get('bm25_score'),
         'fused_score': hit.get('fused_score'),
         'rerank_score': hit.get('rerank_score'),
+        # 分数**是哪个量纲**。没有它，日志里的 score 就没法用来标定阈值——
+        # 实测过：欠费那天向量路挂掉，同一条查询的 score 从 0.32 变成 47.87，
+        # 而它在日志里长得跟正常记录一模一样。
+        'score_kind': hit.get('score_kind'),
         'rank_vector': hit.get('rank_vector'),
         'rank_bm25': hit.get('rank_bm25'),
         'rank_fused': hit.get('rank_fused'),
