@@ -70,6 +70,17 @@ class RetrievalOutcome:
     sub_queries: list[str] = field(default_factory=list)
     covered_lines: list[str] = field(default_factory=list)
     wiki_entry: dict[str, Any] | None = None
+    # 词条**原始依据**的那些条款，从关系库取出来的真实切片。
+    #
+    # ⚠️ 它**故意不进 `hits`**，因为 `hits` 是检索层的成绩单
+    # （评测判"锚点有没有被召回"看的就是它）。词条依据是预编译层的产物，
+    # 把它塞进 hits 会让检索层的分数虚高——那是把两层的东西混在一起算。
+    #
+    # 它的用途只有一个：**让生成层有真实片段可引用**。
+    # 起因是一个真实失败：模型根据词条答了"证券法第一百九十八条、期货法第一百三十五条"
+    # 的罚款幅度，**却引用为空**——因为词条是作为另一个块给它的，没有编号可填。
+    # 于是"给结论、没引用"就这么混过去了，用户没法核对。
+    wiki_evidence: list[dict[str, Any]] = field(default_factory=list)
     # 两条路都空的时候，向量库里到底有多少条。只用于把
     # "库里真的没有" 和 "检索链路坏了" 分开（见 _flag_silent_empty）。
     vector_total: int | None = None
@@ -212,6 +223,7 @@ def retrieve(
             entry = match_entry_with_vector(db, cleaned, query_vector=query_vector)
             if entry is not None:
                 outcome.wiki_entry = entry_as_context(entry)
+                outcome.wiki_evidence = _wiki_evidence(db, outcome.wiki_entry)
         except Exception:  # noqa: BLE001
             logger.exception('[RETRIEVE] Wiki 路由失败，按纯 RAG 继续: query=%r', cleaned)
 
@@ -485,6 +497,84 @@ def _merge_exact_hits(
     # 精确命中自己就超过 top_k 时，宁可多给几条也不截断那一条法规。
     keep = max(0, top_k - len(exact_hits))
     return exact_hits + remainder[:keep]
+
+
+def _wiki_evidence(
+    db: Session,
+    wiki_entry: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """把词条「依据」里那些条款，从关系库取出真实切片。
+
+    起因是一个真实失败：模型依据词条答出了"《证券法》第一百九十八条、
+    《期货和衍生品法》第一百三十五条"的罚款幅度，**却一条引用都没有**。
+
+    根因不是它偷懒，是**结构上没有编号可填**——词条是作为单独一个块
+    【知识库词条】交给它的，不在【检索片段】的编号体系里；
+    而提示词又要求「依据片段」只能填检索片段的编号。于是它只能空着。
+
+    所以修法不是逼它编一个引用，而是**把词条的原始依据变成真实片段**：
+    词条的 citations 里写着（文档名 + 条款号），而这些条款本来就在库里。
+
+    两个刻意的边界：
+
+      · **不进 `hits`**（见 `wiki_evidence` 字段的说明）——检索层的成绩单
+        不能因为预编译层的产物而虚高；
+      · 取不到就跳过，**不报错、不阻断**。词条的依据清单是人工核对过的，
+        但语料版本变了、文档标题对不上，都有可能取不到——
+        那种情况下最差只是回到"这次没有可引用的原始条款"，
+        不能让整个问答挂掉。
+    """
+
+    from app.models.document import Document
+    from app.rag.citation import lookup_article
+    from app.rag.splitters.legal import chinese_number_to_int
+
+    evidence: list[dict[str, Any]] = []
+    for citation in wiki_entry.get('citations') or []:
+        title = str(citation.get('文档') or '').strip()
+        article = str(citation.get('条款') or '').strip()
+        number = chinese_number_to_int(article)
+        if not title or number is None:
+            continue
+        try:
+            # 词条的 citations 存的是**文档标题**（不是文件名），所以两个都试。
+            document = db.execute(
+                select(Document)
+                .where((Document.title == title) | (Document.filename == title))
+                .limit(1)
+            ).scalar_one_or_none()
+            if document is None:
+                logger.info('[RETRIEVE] 词条依据对不上文档: %s', title)
+                continue
+            chunks = lookup_article(db, document_id=document.id, article_int=number)
+        except Exception:  # noqa: BLE001
+            logger.exception('[RETRIEVE] 取词条依据失败: %s %s', title, article)
+            continue
+        for chunk in chunks:
+            chunk = dict(chunk)
+            chunk['retrieval_source'] = 'wiki_evidence'
+            chunk['retrieval_sources'] = ['wiki_evidence']
+            # 词条依据同样是"某份法规的某一条"，所以该带的元数据要带全——
+            # 少了效力层级，提示词里"必须说明依据出自哪一层"就落不了地。
+            chunk = _with_effect_labels(
+                chunk,
+                {
+                    str(document.id): {
+                        'doc_number': document.doc_number,
+                        'issued_date_label': _cn_date(document.issued_date),
+                        'effective_date_label': _cn_date(document.effective_date),
+                    }
+                },
+            )
+            evidence.append(chunk)
+
+    if evidence:
+        logger.info(
+            '[RETRIEVE] 词条依据已转成可引用片段: %s 片（来自 %s 条依据）',
+            len(evidence),
+            len(wiki_entry.get('citations') or []),
+        )
+    return evidence
 
 
 def _cn_date(value: Any) -> str | None:

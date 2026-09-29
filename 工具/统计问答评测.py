@@ -139,11 +139,19 @@ def find_column(row: dict[str, str], keyword: str) -> str | None:
     return None
 
 
-def verdict_of(value: str) -> str:
+def verdict_of(value: str, *, blank_as_pass: bool = False) -> str:
     """把人工判定那一格翻成三档结果。"""
 
     raw = (value or '').strip()
     text = raw.lower()
+    # 空白格子的含义**取决于约定**，所以它由调用方显式指定，不在这里默认。
+    #
+    # 第一轮判卷是逐行打 √ 的，空白 = 没判；
+    # 全量回归那一轮判卷人只标了有问题的 6 道，空白 = 没问题。
+    # 两种约定都真实存在过，所以**不能让代码替人决定**——那会把
+    # "没判的当成判过了"这种最危险的错误藏进默认值里。
+    if not raw:
+        return '通过' if blank_as_pass else '未识别'
     # 先看**开头**：人会写成"通过""通过，但引用可以更精确"。
     # 只做全等比较的话，后半句一加就落到"未识别"里，方向就反了。
     if text in PASS_MARKS or any(text.startswith(mark) for mark in PASS_MARKS):
@@ -173,6 +181,12 @@ def main() -> int:
         default=None,
         help='复评结果文件。给了它就会输出"第一轮 → 复评后"的对比',
     )
+    parser.add_argument(
+        '--blank-as-pass',
+        action='store_true',
+        help='把"没填判定"当成通过。⚠️ 这是一条**约定**，不是事实，'
+             '只有在判卷人明确说过"只标有问题的"时才能用',
+    )
     args = parser.parse_args()
 
     if args.file:
@@ -196,7 +210,14 @@ def main() -> int:
     print(f'题数：{len(rows)}')
     print()
 
-    verdicts = [(row, verdict_of(row.get(judge_col) or '')) for row in rows]
+    verdicts = [
+        (
+            row,
+            verdicts_of([row], judge_col, blank_as_pass=args.blank_as_pass,
+                        note_col=note_col)[str(row.get('编号'))],
+        )
+        for row in rows
+    ]
     counts = collections.Counter(verdict for _, verdict in verdicts)
     unknown = [(row, row.get(judge_col)) for row, v in verdicts if v == '未识别' and (row.get(judge_col) or '').strip()]
 
@@ -308,13 +329,49 @@ def main() -> int:
         review_rows = read_table(review_path)
         review_judge = find_column(review_rows[0], '人工判定')
         merged = merge_review(rows, review_rows, judge_col, review_judge)
-        print_rounds(rows, merged, judge_col, review_judge, review_path.name)
+        print_rounds(
+            rows,
+            merged,
+            judge_col,
+            review_judge,
+            review_path.name,
+            blank_as_pass=args.blank_as_pass,
+            note_col=note_col,
+        )
 
     return 0
 
 
-def verdicts_of(rows: list[dict[str, str]], judge_col: str) -> dict[str, str]:
-    return {str(row.get('编号')): verdict_of(row.get(judge_col) or '') for row in rows}
+def verdicts_of(
+    rows: list[dict[str, str]],
+    judge_col: str,
+    *,
+    blank_as_pass: bool = False,
+    note_col: str | None = None,
+) -> dict[str, str]:
+    """每道题的判定。
+
+    ⚠️ 有一条实测踩到的规则：**判定列空着、但备注列写了字时，按备注判。**
+
+    判卷人填表并不总是填在同一列——实测里有两道题的意见写在「备注」里
+    （"需补充证监会令第202号的完整规章清单""应引用第三十三条，而非第二十七条"）。
+    如果只看判定列，这两道会被"空白=通过"的约定**误判成通过**，
+    而它们恰恰是判卷人明确指出的问题。
+
+    **人是按内容表达的，代码得跟着内容判，而不是跟着列名判。**
+    """
+
+    result: dict[str, str] = {}
+    for row in rows:
+        judge = (row.get(judge_col) or '').strip()
+        if not judge and note_col:
+            # 判定列空着，看备注有没有说事
+            note = (row.get(note_col) or '').strip()
+            if note:
+                result[str(row.get('编号'))] = verdict_of(note)
+                continue
+        result[str(row.get('编号'))] = verdict_of(judge, blank_as_pass=blank_as_pass)
+    return result
 
 
 def merge_review(
@@ -339,17 +396,28 @@ def print_rounds(
     base_judge: str,
     review_judge: str | None,
     review_name: str,
+    *,
+    blank_as_pass: bool = False,
+    note_col: str | None = None,
 ) -> None:
     """输出"第一轮 → 复评后"的对比，以及哪些题变了、哪些还没过。"""
 
-    before = verdicts_of(base, base_judge)
-    after = verdicts_of(merged, base_judge)
+    before = verdicts_of(
+        base, base_judge, blank_as_pass=blank_as_pass, note_col=note_col
+    )
+    after = verdicts_of(
+        merged, base_judge, blank_as_pass=blank_as_pass, note_col=note_col
+    )
     total = len(base)
 
     print()
     print('=' * 66)
     print(f'复评合并（{review_name}）：第一轮 → 复评后')
     print('=' * 66)
+    if blank_as_pass:
+        print('  ⚠️ 本次按"**没填判定 = 通过**"计。这是一条**约定**，不是事实——')
+        print('     它只在判卷人明确说过"我只标有问题的"时才成立。')
+        print()
 
     first_pass = sum(1 for value in before.values() if value == '通过')
     final_pass = sum(1 for value in after.values() if value == '通过')

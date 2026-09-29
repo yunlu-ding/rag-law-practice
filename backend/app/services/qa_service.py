@@ -230,6 +230,17 @@ class QaService:
             return outcome
 
         # ---- 生成 ----
+        # ---- 交给模型的证据 = 检索结果 + 词条的原始依据 ----
+        #
+        # 词条的原始依据（它引用的那些法规条款）也要编号送进去，
+        # 这样模型**有真实片段可以引用**，而不是只能引用一个没有编号的词条块。
+        # 起因就是那个真实失败：模型依据词条答了罚款幅度，却一条引用都没有——
+        # 因为当时它手里没有任何合法的编号可填。
+        #
+        # ⚠️ 注意用的是 `evidence` 而不是单独用 `retrieval.hits` 去还原引用：
+        # 模型看到的是第 1..N 片，编号必须和它看到的顺序完全一致，
+        # 否则"引用还原"会指错片段——那比没有引用更糟。
+        evidence = list(retrieval.hits) + list(retrieval.wiki_evidence)
         contexts = [
             {
                 'label': str(index),
@@ -251,7 +262,7 @@ class QaService:
                 'effective_date_label': hit.get('effective_date_label'),
                 'retrieval_sources': hit.get('retrieval_sources') or [],
             }
-            for index, hit in enumerate(retrieval.hits, start=1)
+            for index, hit in enumerate(evidence, start=1)
         ]
         user_prompt = build_user_prompt(
             question=outcome.question,
@@ -292,7 +303,7 @@ class QaService:
                 # 这是提示词需要迭代的信号，不是可以在代码里悄悄修正的小问题。
                 logger.warning('[QA] 结论不在枚举内: %r', outcome.conclusion)
             outcome.citations, outcome.unknown_citations = _restore_citations(
-                parsed.get('依据片段'), retrieval.hits
+                parsed.get('依据片段'), evidence
             )
             outcome.unsupported_clauses = _unsupported_clauses(
                 outcome.clause, outcome.citations
