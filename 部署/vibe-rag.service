@@ -1,0 +1,39 @@
+# systemd 服务单元模板
+#
+# 用法：
+#   sudo cp vibe-rag.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vibe-rag
+#
+# 注意：这是模板，我没法在本地验证（本地是 Windows，没有 systemd）。
+#      部署后一定执行 systemctl status vibe-rag 确认它是 active。
+
+[Unit]
+Description=CFA 智能备考知识库
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/vibe-rag/backend
+
+# PYTHONUTF8 不是可选项：项目里有中文与特殊字符，
+# Windows 上曾因为这个抛 UnicodeEncodeError 并中断业务流程。
+# Linux 默认是 UTF-8，但显式写上更保险。
+Environment=PYTHONUTF8=1
+Environment=PYTHONIOENCODING=utf-8
+
+ExecStart=/opt/vibe-rag/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 崩溃自动重启。服务挂了没人知道是最糟的情况——
+# 用户看到的是"打不开"，而你以为是"没人用"。
+Restart=always
+RestartSec=5
+
+# 日志进 journald，用 journalctl -u vibe-rag 查看
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

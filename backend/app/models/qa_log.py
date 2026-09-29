@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from sqlalchemy import Boolean, Integer, JSON, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base, TimestampMixin
+
+
+class QaLog(Base, TimestampMixin):
+    """问答记录。
+
+    这张表是"评测"的数据来源：判断题的结论、引用、是否拒答、
+    有没有出现编造的引用，全都记在这里。
+    没有它，评测就只能靠人工一条条重跑；有了它，
+    可以按结论类型、是否存在未知引用等条件筛选出可疑样本，
+    把人工判卷的力气花在最值得看的地方。
+    """
+
+    __tablename__ = 'qa_log'
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+        comment='记录主键',
+    )
+    session_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+        comment='会话 ID，用于把多轮追问串起来；为空表示单轮问答',
+    )
+    question: Mapped[str] = mapped_column(Text, nullable=False, comment='用户问题')
+    conclusion: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, comment='结论：违反 / 不违反 / 无法判断 / 说明'
+    )
+    clause: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, comment='涉及的条款编号'
+    )
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True, comment='理由')
+    assumption: Mapped[str | None] = mapped_column(Text, nullable=True, comment='判断前提')
+
+    citations: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False, comment='已还原的引用（含文件名与页码）'
+    )
+    unknown_citations: Mapped[list[str]] = mapped_column(
+        JSON,
+        default=list,
+        nullable=False,
+        comment='模型引用了不存在的片段 ID —— 这是一次可检测的编造',
+    )
+
+    refused: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, comment='是否走了拒答分支'
+    )
+    refusal_reason: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment='拒答原因（检索分数不足 / 无法判断）'
+    )
+    refusal_threshold: Mapped[float | None] = mapped_column(
+        nullable=True, comment='本次生效的拒答阈值，便于复现'
+    )
+
+    parse_ok: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, comment='模型输出是否被成功解析为结构化结果'
+    )
+    retrieval_failed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        comment='检索链路是否故障导致无法作答（与"知识库里没有依据"是两回事）',
+    )
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True, comment='使用的生成模型')
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True, comment='总耗时')
+    retrieval_log_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, comment='关联的检索日志，可回溯当时召回了什么'
+    )

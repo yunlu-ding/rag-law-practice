@@ -1,0 +1,203 @@
+:root {
+  --bg: #0f1419;
+  --panel: #171d26;
+  --panel-2: #1d2530;
+  --border: #2a3441;
+  --text: #e6edf3;
+  --muted: #8b98a5;
+  --accent: #3b82f6;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --err: #ef4444;
+  --off: #374151;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--panel);
+}
+.brand { font-size: 16px; font-weight: 600; }
+.brand small { color: var(--muted); font-weight: 400; margin-left: 10px; }
+.conn { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); }
+.dot.ok { background: var(--ok); }
+.dot.err { background: var(--err); }
+
+main { display: grid; grid-template-columns: 200px 1fr; min-height: calc(100vh - 53px); }
+nav { border-right: 1px solid var(--border); padding: 16px 10px; background: var(--panel); }
+nav a {
+  display: block; padding: 9px 12px; margin-bottom: 2px; border-radius: 6px;
+  color: var(--muted); text-decoration: none; font-size: 13px; cursor: pointer;
+}
+nav a.active { background: var(--panel-2); color: var(--text); }
+nav a.soon { opacity: .4; cursor: default; }
+nav a .tag { float: right; font-size: 11px; }
+
+section { padding: 24px 28px; max-width: 1080px; }
+h2 { font-size: 17px; margin: 0 0 4px; font-weight: 600; }
+h3 { font-size: 14px; margin: 26px 0 10px; font-weight: 600; color: var(--muted); }
+.sub { color: var(--muted); margin-bottom: 18px; font-size: 13px; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+.card .name { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.card .note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+
+.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--panel-2); color: var(--muted); }
+.badge.ok { background: rgba(34,197,94,.15); color: var(--ok); }
+.badge.warn { background: rgba(245,158,11,.15); color: var(--warn); }
+.badge.err { background: rgba(239,68,68,.15); color: var(--err); }
+.badge.run { background: rgba(59,130,246,.15); color: var(--accent); }
+
+table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px; overflow: hidden; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: middle; }
+th { color: var(--muted); font-weight: 500; background: var(--panel-2); }
+tr:last-child td { border-bottom: none; }
+td.mono { font-family: ui-monospace, Consolas, monospace; color: var(--accent); font-size: 12px; }
+
+.btn {
+  display: inline-block; padding: 7px 16px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text); font-size: 13px; cursor: pointer;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:disabled { opacity: .5; cursor: not-allowed; }
+.btn.small { padding: 3px 10px; font-size: 12px; }
+.btn.danger:hover { border-color: var(--err); color: var(--err); }
+
+.dropzone {
+  border: 1px dashed var(--border); border-radius: 10px; padding: 40px 20px;
+  text-align: center; color: var(--muted); cursor: pointer; background: var(--panel);
+}
+.dropzone:hover, .dropzone.over { border-color: var(--accent); color: var(--text); }
+.dropzone strong { color: var(--text); display: block; margin-bottom: 6px; font-size: 15px; }
+
+.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
+.msg { margin-top: 14px; padding: 10px 14px; border-radius: 6px; font-size: 13px; display: none; }
+.msg.show { display: block; }
+.msg.ok { background: rgba(34,197,94,.12); color: #86efac; }
+.msg.err { background: rgba(239,68,68,.12); color: #fca5a5; }
+.msg.run { background: rgba(59,130,246,.12); color: #93c5fd; }
+
+.bar { height: 6px; border-radius: 3px; background: var(--off); overflow: hidden; min-width: 90px; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+.bar.done > i { background: var(--ok); }
+.bar.fail > i { background: var(--err); }
+
+.tip {
+  background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 6px; padding: 12px 16px; color: var(--muted); font-size: 13px; margin-top: 24px;
+}
+.tip code { color: var(--text); }
+a.link { color: var(--accent); }
+.empty { padding: 40px; text-align: center; color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; }
+
+.mask {
+  position: fixed; inset: 0; background: rgba(0,0,0,.6);
+  display: none; align-items: center; justify-content: center; z-index: 20;
+}
+.mask.show { display: flex; }
+.modal {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 22px 24px; width: 520px; max-width: 92vw;
+}
+.modal h4 { margin: 0 0 10px; font-size: 15px; }
+.modal p { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+.modal ul { color: var(--muted); font-size: 13px; margin: 8px 0 0; padding-left: 18px; }
+.modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+
+/* ---------------------------------------------------------------- 仪表盘 */
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin-bottom: 26px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+
+.panel h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.panel .hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 14px;
+  line-height: 1.5;
+}
+
+/* 关键数字：一排大数字，用来一眼看出"系统在运转" */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.kpi {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.kpi .k-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.kpi .k-value { font-size: 24px; font-weight: 600; line-height: 1.2; }
+.kpi .k-note { font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+/* 横向条形：比饼图更容易比较大小，也比图表库轻得多 */
+.bars { display: flex; flex-direction: column; gap: 9px; }
+.bar-row { display: grid; grid-template-columns: 118px 1fr 62px; align-items: center; gap: 10px; }
+.bar-label { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { height: 16px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.bar-track > i { display: block; height: 100%; border-radius: 4px; transition: width .5s ease; }
+.bar-value { font-size: 12px; color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
+
+.donut-wrap { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.legend { display: flex; flex-direction: column; gap: 7px; font-size: 12px; }
+.legend span.swatch {
+  display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+  margin-right: 7px; vertical-align: middle;
+}
+.legend .v { color: var(--muted); margin-left: 6px; }
+
+/* 评测页：指标条 */
+.metric-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.metric {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  text-align: center;
+}
+.metric .m-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.metric .m-value { font-size: 21px; font-weight: 600; }
+.metric .m-value.good { color: var(--ok); }
+.metric .m-value.warn { color: var(--warn); }

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>金融监管法规知识库</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">金融监管法规知识库 <small id="stage">加载中…</small></div>
+    <div class="conn"><span class="dot" id="dot"></span><span id="connText">正在连接后端…</span></div>
+  </header>
+
+  <main>
+    <nav id="nav">
+      <a data-view="overview">总览</a>
+      <a data-view="upload">上传入库 <span class="tag">新</span></a>
+      <a data-view="documents">文档管理 <span class="tag">新</span></a>
+      <a data-view="chunks">切片管理 <span class="tag">新</span></a>
+      <a data-view="retrieval">检索调试台 <span class="tag">新</span></a>
+      <a data-view="qa">问答 <span class="tag">新</span></a>
+    </nav>
+
+    <section id="view"></section>
+  </main>
+
+  <div class="mask" id="mask">
+    <div class="modal" id="modal"></div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

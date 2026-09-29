@@ -1,0 +1,41 @@
+# ============================================================
+# 金融监管法规知识库 · 后端依赖
+#
+# 说明：本文件按"最终形态"列出全部依赖；当前步骤（阶段一 · 骨架）
+# 只需要最前面那一组。后面的分组会在对应步骤启用，注释里已标明。
+# ============================================================
+
+# ---- 阶段一：Web 骨架（现在就需要）----
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.0
+pydantic-settings>=2.0
+python-multipart>=0.0.9
+python-dotenv>=1.0
+
+# ---- 阶段二：文档入库 ----
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1
+pypdf>=4.0
+python-docx>=1.1
+markdown>=3.5
+chardet>=5.0
+# pypdf 解析某些内嵌字体的 PDF 时会提示 "fontTools is required"。
+# 不装也能跑，但装了更稳妥（它影响的是特殊字体下的字符编码还原）。
+fonttools>=4.50
+
+# ---- 阶段三：向量化与检索 ----
+langchain>=1.2.10
+langchain-core>=1.2.10
+langchain-community>=0.1.0
+langchain-dashscope>=0.1.0
+langchain-milvus>=0.1.0
+pymilvus>=2.4.0
+langgraph>=1.0.10
+langgraph-checkpoint-postgres>=1.0.0
+rank-bm25>=0.2
+jieba>=0.42
+
+# ---- 阶段四：部署与防护 ----
+# 反向代理与 HTTPS 在服务器层解决，不在这里。
+# 限流与预算用数据库计数实现，暂不引入 Redis（业务链路目前用不到它）。
