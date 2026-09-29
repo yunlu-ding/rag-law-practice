@@ -61,6 +61,12 @@ class QaLog(Base, TimestampMixin):
         nullable=False,
         comment='「条款」字段里无依据的条款编号（引用的片段里没有它）',
     )
+    no_citation_answer: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        comment='实质作答（违反/不违反/说明）却没有任何引用 —— 结论无法逐条核对',
+    )
 
     refused: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, comment='是否走了拒答分支'

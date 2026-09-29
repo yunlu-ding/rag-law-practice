@@ -89,6 +89,19 @@ class QaOutcome:
     #   · unsupported_clauses —— 编了条款编号（"依据第五十条"，可引的片段里没有第五十条）。
     # 后者更隐蔽：它看起来特别可信，因为它长得就像法条号。
     unsupported_clauses: list[str] = field(default_factory=list)
+    # **实质作答、却一条引用都没有。**
+    #
+    # 这是全量回归时抓出来的，而且是两层防线都没覆盖到的一种情况：
+    #   · "引用条数=0" 本身不算错——拒答时本来就没有引用，所以不能一刀切拦；
+    #   · `unsupported_clauses` 在没有引用时**直接跳过校验**，于是
+    #     "口述条款号、但不引用任何片段"这条路两头都没人管。
+    #
+    # 实测那一题（问证券和期货的行政处罚差异）给出的答案里，
+    # 明确写了"依据《证券法》第一百九十八条…依据《期货和衍生品法》第一百三十五条…"，
+    # 罚款幅度都报出来了，**却一条引用都没有**。
+    # 对一个把"每条结论都能指回条款"当卖点的产品来说，这种回答是不能放行的：
+    # 用户看到的每个数字都无法核对。
+    no_citation_answer: bool = False
     parse_ok: bool = True
     retrieval_failed: bool = False
     raw_output: str | None = None
@@ -291,6 +304,34 @@ class QaService:
                     outcome.question,
                 )
 
+            # ---- 实质作答却没有引用：**必须标出来，不能静默放行** ----
+            #
+            # 判定口径：用「结论」区分两类回答。
+            #   · 「无法判断」——本来就没有引用，正常；
+            #   · 「违反 / 不违反 / 说明」——这是**给了结论**，
+            #     而产品的承诺是"每条结论都能指回条款"。没有引用的结论，
+            #     用户只能选择相信或不信，没法核对。
+            #
+            # 这里只标记、不拒答。理由：内容有可能是对的（模型确实读到了相关片段，
+            # 只是没填「依据片段」字段），一拒就把对的也拒了；
+            # 但**必须让用户看见"这条没有出处"**，也必须在评测里能被统计到——
+            # 否则这种回答会一直混在"通过"里。
+            if (
+                not outcome.refused
+                and outcome.conclusion in {'违反', '不违反', '说明'}
+                and not outcome.citations
+            ):
+                outcome.no_citation_answer = True
+                outcome.evidence_note = (
+                    (outcome.evidence_note + ' ' if outcome.evidence_note else '')
+                    + '注意：本次回答没有给出可核对的引用来源，结论无法逐条核对。'
+                )
+                logger.warning(
+                    '[QA] 实质作答但没有任何引用: question=%r 结论=%s',
+                    outcome.question,
+                    outcome.conclusion,
+                )
+
         # ---- 第二道闸门：模型自己说"无法判断" ----
         if outcome.conclusion == '无法判断':
             outcome.refused = True
@@ -389,6 +430,7 @@ class QaService:
                 citations=outcome.citations,
                 unknown_citations=outcome.unknown_citations,
                 unsupported_clauses=outcome.unsupported_clauses,
+                no_citation_answer=outcome.no_citation_answer,
                 refused=outcome.refused,
                 refusal_reason=outcome.refusal_reason,
                 refusal_kind=outcome.refusal_kind,

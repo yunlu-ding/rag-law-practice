@@ -74,7 +74,7 @@ OUTPUT_COLUMNS = [
     #   · 依据强度 = degraded 时答案质量天然弱一档，判"引用是否支撑结论"
     #     要把这个前提带上看。
     '是否拒答', '拒答种类', '依据强度', '依据提醒',
-    '系统结论', '系统条款', '系统理由', '引用条数', '未还原引用', '无依据条款',
+    '系统结论', '系统条款', '系统理由', '引用条数', '未还原引用', '无依据条款', '无引用作答',
     '引用来源', '错误',
     '人工判定[待你填]', '备注[待你填]',
 ]
@@ -96,6 +96,11 @@ def main() -> int:
         default=None,
         help='只跑指定编号，逗号分隔（如 D5-01,D6-04）。结果写到 问答评测复评.xlsx，不覆盖原表',
     )
+    parser.add_argument(
+        '--output',
+        default=None,
+        help='把结果写到指定文件（相对 评测/ 目录）。用于"全量重跑但保留原表"',
+    )
     args = parser.parse_args()
 
     rows = load_rows()
@@ -110,7 +115,14 @@ def main() -> int:
     if args.limit:
         rows = rows[: args.limit]
 
-    result_file = REVIEW_FILE if args.codes else RESULT_FILE
+    if args.output:
+        result_file = Path(args.output)
+        if not result_file.is_absolute():
+            result_file = ROOT / '评测' / result_file
+    elif args.codes:
+        result_file = REVIEW_FILE
+    else:
+        result_file = RESULT_FILE
     print(f'待跑 {len(rows)} 题（每题会调用一次大模型）')
     print(f'结果写到：{result_file.name}')
     print()
@@ -239,6 +251,7 @@ def main() -> int:
                     '引用条数': len(outcome.citations or []),
                     '未还原引用': '｜'.join(outcome.unknown_citations or []),
                     '无依据条款': '｜'.join(outcome.unsupported_clauses or []),
+                    '无引用作答': '是' if outcome.no_citation_answer else '',
                     '引用来源': citations,
                     '错误': outcome.error or (
                         f'拒答：{outcome.refusal_reason}' if outcome.refused else ''
