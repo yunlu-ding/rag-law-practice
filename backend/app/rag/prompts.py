@@ -187,6 +187,13 @@ def build_user_prompt(
                      f'（第 {hit.get("page_number") or "?"} 页）'
                      f'{(" ｜ " + hit["section_title"]) if hit.get("section_title") else ""}')
         lines.append(f'效力: {level} ｜ {validity}')
+        article = hit.get('article_number')
+        if article:
+            # "精确命中"这几个字是有用的：它告诉模型这一片不是"检索回来觉得像"，
+            # 而是**用户指名的那一条**。模型据此应当以它为主要依据，
+            # 而不是继续在其它片段里找更"相关"的说法。
+            mark = '（用户指名的那一条）' if 'exact' in (hit.get('retrieval_sources') or []) else ''
+            lines.append(f'条款: {article}{mark}')
         lines.append(f'内容: {hit.get("text") or ""}')
 
     lines.append('')

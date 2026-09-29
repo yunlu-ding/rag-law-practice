@@ -183,6 +183,39 @@ def count_article_markers(text: str) -> int:
     return len(_ARTICLE_TOKEN.findall(text))
 
 
+def find_article_tokens(text: str) -> list[str]:
+    """宽松地找出文本里出现过的所有条号，按出现顺序返回。
+
+    和 `article_boundaries` 的区别在于**用途不同**：
+
+    - `article_boundaries` 是给切分用的，它要判断"哪里是一条的起点"，
+      所以宁缺毋滥，用了一组严格的局部判据；
+    - 这个函数是给**查询解析**用的。用户问"《证券期货投资者适当性管理办法》
+      第二十九条"，这句话里"第二十九条"前面是"办法"而不是断句符，
+      严格判据会把它挡掉——但用户的意思非常明确。
+
+    所以查询侧的解析用宽松匹配，只找出"用户提到了哪些条号"，
+    由更高层去判断这是不是一个引用。
+    """
+
+    if not text:
+        return []
+    return [re.sub(r'\s+', '', match.group(0)) for match in _ARTICLE_TOKEN.finditer(text)]
+
+
+def starts_with_article(text: str) -> bool:
+    """这一片正文是不是**以条号开头**。
+
+    用途是区分"这一片就是第 X 条"和"这一片是第 X 条的续片"。
+    两者都有 article_number，但只有前者是那一条的入口——
+    精确检索时它们都要返回（用户要完整的一条），
+    但加权和展示时不能一视同仁：把续片和条文头同等对待，
+    会出现"一片没头没尾的续文排在了整条前面"。
+    """
+
+    return bool(_ARTICLE_TOKEN.match((text or '').strip()))
+
+
 _CN_DIGITS = {'零': 0, '〇': 0, '一': 1, '二': 2, '三': 3, '四': 4,
               '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
 _CN_UNITS = {'十': 10, '百': 100}
@@ -391,17 +424,22 @@ def split_legal_text(
     # 至少保证"第 X 条从这里开始"这件事不被丢掉。
 
     hard_limit = int(chunk_size * hard_limit_multiplier)
-    ranges: list[tuple[int, int]] = []
+    # 三元组多出来的那一项就是"这一片属于哪一条"。
+    # 续片和超长条切出来的每一小片，都带着**同一条**的条号——
+    # 这正是条款级定位能成立的前提。
+    ranges: list[tuple[int, int, str | None]] = []
 
     # 第一条之前的内容（文号、发布日期、通过会议等）单独成片。
     # 它承载的是**元数据**而不是规则，扔掉会让"这份文件什么时候生效的"无处可查。
     preamble_end = spans[0][0]
     if preamble_end > 0 and text[:preamble_end].strip():
-        ranges.append((0, preamble_end))
+        # 前言没有条号。留 None 而不是硬塞一个，是因为"没有条号"这件事
+        # 会影响条款级定位——它不该被当成任何一条法规。
+        ranges.append((0, preamble_end, None))
 
-    for start, end, _article_no in spans:
+    for start, end, article_no in spans:
         if end - start <= hard_limit:
-            ranges.append((start, end))
+            ranges.append((start, end, article_no))
             continue
 
         # 超长条：在条内按句子边界切。
@@ -413,21 +451,28 @@ def split_legal_text(
             cut = min(cut, end)
             if cut <= position:
                 cut = min(position + chunk_size, end)
-            ranges.append((position, cut))
+            ranges.append((position, cut, article_no))
             position = cut
         if position < end:
-            ranges.append((position, end))
+            ranges.append((position, end, article_no))
 
     # 注意：这里**没有** _absorb_tiny_ranges。
     # 结构感知切分用它把碎片并进邻居，但在这个策略下，
     # 把"第N条"并进"第N-1条"恰恰是我们要避免的事。
     # 宁可留一个短切片，也不要让两条法规共享一片。
     chunks: list[SplitChunk] = []
-    for start, end in ranges:
+    for start, end, article_number in ranges:
         content = text[start:end]
         if not content.strip():
             continue
-        chunks.append(SplitChunk(content=content, start_offset=start, end_offset=end))
+        chunks.append(
+            SplitChunk(
+                content=content,
+                start_offset=start,
+                end_offset=end,
+                article_number=article_number,
+            )
+        )
     return chunks
 
 
@@ -437,6 +482,8 @@ __all__ = [
     'article_boundaries',
     'chinese_number_to_int',
     'count_article_markers',
+    'find_article_tokens',
     'looks_legal',
+    'starts_with_article',
     'split_legal_text',
 ]

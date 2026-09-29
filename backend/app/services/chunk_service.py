@@ -91,6 +91,7 @@ class ChunkService:
                 section_index=record.section_index,
                 section_title=(record.section_title or None),
                 page_number=record.page_number,
+                article_number=record.article_number,
                 start_offset=record.start_offset,
                 end_offset=record.end_offset,
                 metadata_json={

@@ -28,11 +28,19 @@ class RetrievalHit(BaseModel):
     document_id: str | None = None
     filename: str | None = None
     page_number: int | None = None
+    article_number: str | None = Field(default=None, description='所属条款号，如"第二十九条"')
+    legal_level: str | None = None
+    legal_level_label: str | None = None
+    validity: str | None = None
+    validity_label: str | None = None
     section_title: str | None = None
     splitter_name: str | None = None
     content_type: str | None = None
     text: str | None = None
-    score: float = 0.0
+    score: float | None = Field(
+        default=None,
+        description='相关性分数。条款精确命中没有这个分数（它不是相似度问题），为 null',
+    )
     vector_score: float | None = None
     bm25_score: float | None = None
     fused_score: float | None = None
@@ -61,6 +69,11 @@ class HybridSearchResponse(BaseModel):
     vector_hit_count: int
     bm25_hit_count: int
     fused_count: int
+    exact_hit_count: int = Field(default=0, description='条款级精确直查命中的切片数')
+    citation: dict[str, Any] | None = Field(
+        default=None,
+        description='查询解析结果：识别到的法规名与条号；解析不出来时为 null',
+    )
     timings_ms: dict[str, int] = Field(default_factory=dict, description='各阶段耗时')
     error: str | None = Field(default=None, description='降级记录：哪一路失败了')
     items: list[RetrievalHit]
@@ -78,7 +91,9 @@ class RetrievalLogItem(BaseModel):
     bm25_hit_count: int
     fused_count: int
     returned_count: int
+    exact_hit_count: int = 0
     timings_ms: dict[str, Any] = Field(default_factory=dict)
+    citation: dict[str, Any] | None = None
     error: str | None = None
     created_at: datetime
     items: list[dict[str, Any]] = Field(default_factory=list)
@@ -174,6 +189,8 @@ def hybrid_search(
         vector_hit_count=outcome.vector_hit_count,
         bm25_hit_count=outcome.bm25_hit_count,
         fused_count=outcome.fused_count,
+        exact_hit_count=outcome.exact_hit_count,
+        citation=outcome.citation,
         timings_ms=outcome.timings_ms,
         error=outcome.error,
         items=[RetrievalHit.model_validate(hit) for hit in outcome.hits],

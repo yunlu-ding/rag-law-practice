@@ -125,6 +125,8 @@ class QaService:
             'vector_hit_count': retrieval.vector_hit_count,
             'bm25_hit_count': retrieval.bm25_hit_count,
             'fused_count': retrieval.fused_count,
+            'exact_hit_count': retrieval.exact_hit_count,
+            'citation': retrieval.citation,
             'timings_ms': retrieval.timings_ms,
             'error': retrieval.error,
         }
@@ -208,6 +210,13 @@ class QaService:
                 'page_number': hit.get('page_number'),
                 'section_title': hit.get('section_title'),
                 'text': hit.get('text'),
+                # 条款号、效力层级、是否精确命中——这三样都要传给模型。
+                # 少了它们，提示词里"必须说明依据出自哪一层效力"
+                # 和"精确命中的那一条是主要依据"就都成了空要求。
+                'article_number': hit.get('article_number'),
+                'legal_level_label': hit.get('legal_level_label'),
+                'validity_label': hit.get('validity_label'),
+                'retrieval_sources': hit.get('retrieval_sources') or [],
             }
             for index, hit in enumerate(retrieval.hits, start=1)
         ]
@@ -374,7 +383,21 @@ def _best_score(hits: list[dict[str, Any]]) -> tuple[float, str]:
     此时分数就变成了向量余弦相似度。
     **阈值必须知道自己是在对哪种分数做判断**，
     否则会出现"换了配置之后拒答行为莫名其妙变了"这种问题。
+
+    ⚠️ 条款**精确命中**要单独处理，而且必须放在最前面判断。
+
+    精确命中是从关系库按（法规名 + 条号）取出来的，它**没有相似度分数**——
+    三项分数全是 None。如果不特判，循环里会走到 `fused_score or 0.0`，
+    于是"用户指名要的那一条已经拿到手了"反而被判成 0 分，
+    低于阈值、直接拒答。这是个自己给自己挖的坑。
+
+    返回 1.0 不是编一个相似度，而是表达"这一类证据的确定性与相似度不是一回事"：
+    用户问第几条、我们就找到了第几条，这里面没有"像不像"的成分，
+    不该再让它去和阈值比大小。
     """
+
+    if any('exact' in (hit.get('retrieval_sources') or []) for hit in hits):
+        return 1.0, 'exact'
 
     best = -1.0
     source = 'none'

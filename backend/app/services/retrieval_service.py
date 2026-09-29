@@ -36,7 +36,8 @@ class RetrievalService:
     def search(self, *, query: str, top_k: int = 5, persist: bool = True) -> RetrievalOutcome:
         """执行检索，并把过程落库。"""
 
-        outcome = retrieve(query, top_k=top_k)
+        # 把 db 传进去，才会启用条款级精确直查（见 retriever._try_citation_lookup）。
+        outcome = retrieve(query, top_k=top_k, db=self.db)
         if persist:
             outcome.log_id = self._persist(outcome)
         return outcome
@@ -54,8 +55,10 @@ class RetrievalService:
                 bm25_hit_count=outcome.bm25_hit_count,
                 fused_count=outcome.fused_count,
                 returned_count=len(outcome.hits),
+                exact_hit_count=outcome.exact_hit_count,
                 timings_ms=outcome.timings_ms,
                 items=[_shrink(hit) for hit in outcome.hits],
+                citation=outcome.citation,
                 error=outcome.error,
             )
             self.db.add(log)

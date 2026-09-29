@@ -28,6 +28,7 @@ class ChunkRecord:
     page_number: int | None = None
     start_offset: int | None = None
     end_offset: int | None = None
+    article_number: str | None = None
 
     @property
     def token_count(self) -> int:
@@ -63,6 +64,16 @@ def build_chunks(
     splitter_usage: dict[str, int] = {}
     global_index = 0
 
+    # 跨 section 记忆"当前在哪一条"。
+    #
+    # 为什么必须跨 section：法规的 section 是"一页"，而一条法规常常被翻页切开。
+    # 后半段落在下一页，那一页的正文里**没有条号**——它就是一截续文。
+    # 不继承的话，这截续文不知道自己属于哪一条，条款级定位就找不到它，
+    # 用户问"第四条怎么规定的"会只拿到前半条。
+    #
+    # 实测：《证券期货投资者适当性管理办法》58 片里有十几片是这种续片。
+    last_article: str | None = None
+
     # 结构判断要做在**文档级**，不是 section 级。
     #
     # 这不是拍脑袋定的，而是被实验打回来一次的结果：
@@ -82,6 +93,15 @@ def build_chunks(
         splitter_usage[splitter_name] = splitter_usage.get(splitter_name, 0) + len(pieces)
 
         for piece in pieces:
+            article_number = piece.article_number
+            if article_number is not None:
+                last_article = article_number
+            elif splitter_name == 'legal':
+                # 只有法规切分下的无条号切片才是"续片"。
+                # 其它策略（结构感知、按长度）根本不产出条号，
+                # 给它们继承一个条号等于凭空标注——那比没有更糟。
+                article_number = last_article
+
             records.append(
                 ChunkRecord(
                     chunk_index=global_index,
@@ -94,6 +114,7 @@ def build_chunks(
                     page_number=_as_int(section.metadata.get('page_number')),
                     start_offset=piece.start_offset,
                     end_offset=piece.end_offset,
+                    article_number=article_number,
                 )
             )
             global_index += 1

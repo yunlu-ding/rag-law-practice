@@ -46,6 +46,9 @@ class RetrievalLog(Base, TimestampMixin):
     bm25_hit_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     fused_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     returned_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    exact_hit_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment='条款级精确直查命中的切片数'
+    )
 
     timings_ms: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False, comment='各阶段耗时：vector / bm25 / rerank'
@@ -55,4 +58,10 @@ class RetrievalLog(Base, TimestampMixin):
     )
     error: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment='降级记录：哪一路失败了'
+    )
+    citation: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment='查询解析结果：识别到的法规名与条号、是否做了精确直查、命中了多少片。'
+        '留着它是为了能复盘——"这次为什么给出这几条"要能从记录里回答',
     )

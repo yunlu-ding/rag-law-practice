@@ -185,6 +185,10 @@ class BM25Index:
                     'splitter_name': chunk.splitter_name,
                     'content_type': chunk.content_type,
                     'text': chunk.content,
+                    # 条款号跟着检索结果走：调试台要能对每一片显示"它属于哪一条"，
+                    # 而不是让读者自己去正文开头找。关键词路本来就在读数据库，
+                    # 这个字段是顺带的。
+                    'article_number': chunk.article_number,
                     # 效力信息要跟着检索结果走。
                     # 提示词里有条硬规则：回答"是否违规"必须说明依据出自哪一层效力。
                     # 如果把这两个字段只留在向量库里，关键词路召回的片段就没有它们，

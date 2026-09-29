@@ -744,6 +744,27 @@ function renderRetrievalStats(data) {
   const rerankMoved = items.filter(
     (h) => h.rank_before_rerank && h.rank_after_rerank && h.rank_before_rerank !== h.rank_after_rerank,
   ).length;
+  const citation = data.citation;
+  // 把"系统把这个问题理解成了什么"摆在最显眼的位置。
+  //
+  // 这一步的价值不在好看，在于**可核对**：用户问的是"《X办法》第二十九条"，
+  // 系统识别成了别的法规、或者识别成"没有条号"，他必须能一眼看出来——
+  // 否则拿到一份答非所问的结果，只会以为"这系统不准"，而不知道它理解错了。
+  let citationLine = '';
+  if (citation) {
+    if (data.exact_hit_count > 0) {
+      citationLine = `<div class="msg show ok" style="margin-top:12px">
+        识别到条款引用：<b>《${esc(citation.document_title)}》${esc(citation.article_number)}</b>
+        —— 已从库里精确取出该条 ${data.exact_hit_count} 片，<b>置于结果最前，不参与相似度排序</b>。
+        <div class="note">理由：条号是标识符，不是相似度。"这一段是不是第二十九条"只有是与否。</div>
+      </div>`;
+    } else {
+      citationLine = `<div class="tip" style="margin-top:12px">
+        条款解析：${esc(citation.reason || '未识别到条款引用')}
+        ${citation.article_number ? `（识别到条号 ${esc(citation.article_number)}，但没有锁定法规名，因此未做精确直查）` : ''}
+      </div>`;
+    }
+  }
   document.getElementById('rstats').innerHTML = `
     <div class="cards" style="margin-top:18px">
       <div class="card">
@@ -766,7 +787,13 @@ function renderRetrievalStats(data) {
         <div><span class="badge ${data.rerank_enabled ? 'ok' : ''}">${data.rerank_enabled ? '已启用' : '已关闭'}</span></div>
         <div class="note">耗时 ${t.rerank ?? '—'} ms ｜ 名次有变 ${rerankMoved} 条</div>
       </div>
+      <div class="card">
+        <div class="name">条款精确直查</div>
+        <div style="font-size:20px;font-weight:600">${data.exact_hit_count ?? 0}</div>
+        <div class="note">${data.exact_hit_count ? '已置顶，不经重排' : '本次未触发'}</div>
+      </div>
     </div>
+    ${citationLine}
     ${data.error ? `<div class="msg show err" style="margin-top:12px">降级记录：${esc(data.error)}</div>` : ''}
     <div class="tip">日志 ID：<code>${esc(data.log_id || '（未记录）')}</code>　
       两路各自的召回条数、融合与重排耗时都在上面——<b>这些数字是回答"为什么是这几条"的完整证据。</b>
@@ -775,9 +802,9 @@ function renderRetrievalStats(data) {
 
 function sourceBadges(hit) {
   const sources = hit.retrieval_sources || (hit.retrieval_source ? [hit.retrieval_source] : []);
-  const names = { vector: '向量', bm25: '关键词', hybrid: '双路' };
+  const names = { vector: '向量', bm25: '关键词', hybrid: '双路', exact: '条款直查' };
   return sources
-    .map((s) => `<span class="badge ${s === 'bm25' ? 'warn' : (s === 'hybrid' ? 'ok' : 'run')}">${names[s] || esc(s)}</span>`)
+    .map((s) => `<span class="badge ${s === 'bm25' ? 'warn' : (s === 'hybrid' || s === 'exact' ? 'ok' : 'run')}">${names[s] || esc(s)}</span>`)
     .join(' ');
 }
 
@@ -803,14 +830,24 @@ function renderRetrievalHits(items) {
       ? `　重排 ${hit.rank_before_rerank} → ${hit.rank_after_rerank}`
       : '';
 
+    // 精确命中的那几片没有相似度分数——它不是相似度问题。
+    // 硬显示成 0.0000 会让人以为"这条不相关"，反而比不显示更糟。
+    const isExact = (hit.retrieval_sources || []).includes('exact');
+    const scoreText = isExact
+      ? '<span class="badge ok">条款精确命中</span>'
+      : `得分 ${hit.score == null ? '—' : Number(hit.score).toFixed(4)}`;
+    const articleBadge = hit.article_number
+      ? `<span class="badge">${esc(hit.article_number)}</span>`
+      : '';
+
     return `
       <div class="card" style="margin-bottom:10px">
         <div style="display:flex;justify-content:space-between;gap:14px;margin-bottom:8px;flex-wrap:wrap">
           <div style="font-size:12px;color:var(--muted)">
-            ${sourceBadges(hit)} ｜ ${esc(origin)} ｜ 策略 ${esc(hit.splitter_name || '—')}
+            ${sourceBadges(hit)} ${articleBadge} ｜ ${esc(origin)} ｜ 策略 ${esc(hit.splitter_name || '—')}
           </div>
           <div style="font-size:12px;color:var(--accent);white-space:nowrap">
-            得分 ${Number(hit.score || 0).toFixed(4)}
+            ${scoreText}
           </div>
         </div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${esc(ranks + moved)}</div>

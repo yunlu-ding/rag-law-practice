@@ -62,6 +62,14 @@ class Chunk(Base, TimestampMixin):
         String(500), nullable=True, comment='所属小节标题；引用展示要用'
     )
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True, comment='来源页码')
+    article_number: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+        index=True,
+        comment='所属条款号（如"第二十九条"）。'
+        '它是法规场景的定位键：用户问"第X条"时靠它做精确匹配，'
+        '而不是靠相似度去猜。无条号的切片（前言、非法规文本）留空',
+    )
     start_offset: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment='在所属 section 内的起始位置'
     )

@@ -142,8 +142,16 @@ def show_retrieval() -> None:
                 print('  （没有召回任何内容）')
             for rank, hit in enumerate(outcome.hits, start=1):
                 snippet = ' '.join(str(hit.get('text') or '').split())[:70]
+                # 条款精确命中没有相似度分数（它不是相似度问题），
+                # 所以这里要能显示"精确命中"而不是一个数字。
+                sources = hit.get('retrieval_sources') or []
+                if 'exact' in sources:
+                    score_text = f'条款精确命中（{hit.get("article_number") or "?"}）'
+                else:
+                    score = hit.get('score')
+                    score_text = f'score={score:.4f}' if score is not None else '无分数'
                 print(
-                    f'  {rank}. score={hit.get("score"):.4f} '
+                    f'  {rank}. {score_text} '
                     f'来源={hit.get("filename")} ｜ {snippet}'
                 )
             print()

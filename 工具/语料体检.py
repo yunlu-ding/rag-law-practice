@@ -37,6 +37,7 @@ from app.rag.loader import load_document  # noqa: E402
 from app.rag.splitters.legal import (  # noqa: E402
     audit_article_boundaries,
     chinese_number_to_int,
+    starts_with_article,
 )
 from app.rag.metadata import LEGAL_LEVEL_BY_FOLDER, extract_metadata  # noqa: E402
 from app.rag.metadata_overrides import apply_overrides  # noqa: E402
@@ -79,6 +80,18 @@ def inspect(path: Path, *, legal_level: str | None) -> dict:
     audit = audit_article_boundaries(loaded.full_text)
     article_total = len(audit['accepted'])
     rejected_total = len(audit['rejected'])
+
+    # 切片层面的条号覆盖。这是"条款级精确检索"能不能用的前提：
+    # 一片没有条号，就等于它在那套定位体系里不存在。
+    chunking = build_chunks(loaded)
+    heads = continuations = orphans = 0
+    for record in chunking.records:
+        if record.article_number and starts_with_article(record.content):
+            heads += 1
+        elif record.article_number:
+            continuations += 1
+        else:
+            orphans += 1
 
     # 内部一致性：条文编号应该是连续的。缺号说明有一条真条文被过滤错了，
     # 后果是它和上一条被并进同一片——这件事在成品里看不出来，只能在这里查。
@@ -125,6 +138,9 @@ def inspect(path: Path, *, legal_level: str | None) -> dict:
         'article_rejected': rejected_total,
         'article_gaps': gaps,
         'article_duplicates': duplicates,
+        'chunk_heads': heads,
+        'chunk_continuations': continuations,
+        'chunk_orphans': orphans,
         'chunks': stats['chunk_count'],
         'per_article': per_article,
         'avg_length': stats['avg_length'],
@@ -174,17 +190,15 @@ def build_report(rows: list[dict], failures: list[tuple[str, str]]) -> str:
 
     add('## 二、逐份明细')
     add('')
-    add('| # | 文件 | 类型 | 正文(字) | 汉字占比 | 条数 | 切片 | 片/条 | 均长 | 残句率 | 条界缺口 | 重号 |')
-    add('|---|---|---|---|---|---|---|---|---|---|---|---|')
+    add('| # | 文件 | 类型 | 正文(字) | 汉字占比 | 条数 | 切片 | 条文头 | 续片 | 无条号 | 片/条 | 均长 | 残句率 |')
+    add('|---|---|---|---|---|---|---|---|---|---|---|---|---|')
     for index, row in enumerate(rows, start=1):
         per_article = row['per_article'] if row['per_article'] is not None else '—'
-        gaps = row['article_gaps']
-        gap_text = '无' if not gaps else (f'{len(gaps)} 处' if len(gaps) > 4 else '、'.join(map(str, gaps)))
         add(
             f"| {index} | {row['filename']} | {row['file_type']} | {row['chars']:,} "
-            f"| {row['han_ratio']:.1%} | {row['articles']} | {row['chunks']} | {per_article} "
-            f"| {row['avg_length']} | {row['mid_word_ratio']:.1%} "
-            f"| {gap_text} | {row['article_duplicates']} |"
+            f"| {row['han_ratio']:.1%} | {row['articles']} | {row['chunks']} "
+            f"| {row['chunk_heads']} | {row['chunk_continuations']} | {row['chunk_orphans']} "
+            f"| {per_article} | {row['avg_length']} | {row['mid_word_ratio']:.1%} |"
         )
     add('')
 

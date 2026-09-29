@@ -119,9 +119,18 @@ def main() -> int:
     print('--- retrieve()（线上真实链路，candidate_k=%s）---' % settings.rerank_candidate_k)
     from app.rag.retriever import retrieve
 
-    outcome = retrieve(args.query, top_k=args.top)
+    # 带上 db 才会启用条款级精确直查——不带的话跑的是"纯检索"链路，
+    # 诊断出来的结论和线上就不是一回事了。
+    from app.core.postgres import get_session_factory
+
+    with get_session_factory()() as session:
+        outcome = retrieve(args.query, top_k=args.top, db=session)
+        session.expunge_all()
     print(f'  向量路 {outcome.vector_hit_count} 条，BM25 路 {outcome.bm25_hit_count} 条，'
           f'融合后 {outcome.candidate_k} 条')
+    if outcome.citation:
+        mark = '已精确直查' if outcome.exact_hit_count else '未直查'
+        print(f'  条款解析：{outcome.citation.get("reason")}（{mark}）')
     for rank, hit in enumerate(outcome.hits, start=1):
         sources = '+'.join(hit.get('retrieval_sources') or [])
         print(f'  {rank}. score={hit.get("score", 0):.4f} [{sources}] {brief(hit)}')
