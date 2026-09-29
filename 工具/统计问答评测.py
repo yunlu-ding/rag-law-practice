@@ -15,11 +15,13 @@
 
 ## 两个刻意的口径选择
 
-**一、编码自动识别。**
-这张表是给人判的，人会拿 Excel / WPS 打开，一存就变成 GBK 或 GB18030，
-而脚本自己写的是 UTF-8。所以读的时候按
-「UTF-8 带 BOM → UTF-8 → GB18030」的顺序试，而不是写死一个。
-（踩过：写死 utf-8 直接 `UnicodeDecodeError`，看起来像文件坏了。）
+**一、默认读 xlsx，读 csv 时编码自动识别。**
+这张表是给人判的，人会拿 Excel / WPS 打开。而 Excel 保存 CSV 时按本地编码写
+（这台机器上是 GBK），脚本下一次按 UTF-8 读就 `UnicodeDecodeError`——
+看起来像文件坏了，其实只是编码被换掉了。
+
+所以**这张表和评测集一样，xlsx 是唯一源**。读 csv 的能力留着，是因为
+历史文件是 csv（要能回头算），读的时候按 utf-8-sig → utf-8 → gb18030 依次试。
 
 **二、判定符号要宽容，但只认三种结果。**
 人填的时候会写"通过"、会打"√"、会写"是"。这些**都算通过**。
@@ -29,7 +31,8 @@
 
 用法：
     python 工具/统计问答评测.py
-    python 工具/统计问答评测.py --csv 评测/问答评测明细.csv
+    python 工具/统计问答评测.py
+    python 工具/统计问答评测.py --file 评测/问答评测明细.xlsx
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ except Exception:  # noqa: BLE001
     pass
 
 DEFAULT_CSV = ROOT / '评测' / '问答评测明细.csv'
+DEFAULT_XLSX = ROOT / '评测' / '问答评测明细.xlsx'
 
 # 人工判定列的写法 → 三档结果。
 #
@@ -59,9 +63,36 @@ PASS_MARKS = {'通过', '√', '✓', '是', 'y', 'yes', '1', 'ok', '正确'}
 PARTIAL_MARKS = {'部分', '△', '基本通过', '部分通过', '0.5'}
 FAIL_MARKS = {'未通过', '×', 'x', '否', 'no', '0', '不通过', '错误'}
 
+# 但人写判卷意见时**不会只用符号**——实测拿到的是一句句中文：
+#
+#     「结论未命中，引用不支撑」
+#     「系统条款错误，引用不匹配」
+#     「结论不完整」
+#     「结论表述有歧义/错误」
+#
+# 所以除了符号，还要能读这些评语。词表按**严重程度**排：
+# 先判"明确错"，再判"不完整"。这个顺序要紧——
+# 「结论表述有歧义/错误」两头都沾，它应当落到**未通过**而不是部分。
+#
+# 判不出来的写法仍然单独列出来并计为未通过：宁可把数字算低。
+FAIL_WORDS = ('错误', '未命中', '不支撑', '不匹配', '矛盾', '不对', '答非所问', '幻觉', '编造', '相反')
+PARTIAL_WORDS = ('不完整', '有歧义', '部分', '遗漏', '不全', '不充分')
 
-def read_rows(path: Path) -> list[dict[str, str]]:
-    """读评测明细，自动识别编码。"""
+
+def read_table(path: Path) -> list[dict[str, str]]:
+    """读评测明细。xlsx 直接读；csv 按编码依次试。"""
+
+    if path.suffix.lower() in ('.xlsx', '.xlsm'):
+        sys.path.insert(0, str(ROOT / '工具'))
+        from 读取表格 import read_xlsx
+
+        table = read_xlsx(path)
+        header = table[0]
+        rows = []
+        for raw in table[1:]:
+            cells = list(raw) + [''] * (len(header) - len(raw))
+            rows.append(dict(zip(header, cells)))
+        return rows
 
     raw = path.read_bytes()
     for encoding in ('utf-8-sig', 'utf-8', 'gb18030'):
@@ -86,23 +117,39 @@ def find_column(row: dict[str, str], keyword: str) -> str | None:
 
 
 def verdict_of(value: str) -> str:
-    text = (value or '').strip().lower()
+    """把人工判定那一格翻成三档结果。"""
+
+    raw = (value or '').strip()
+    text = raw.lower()
     if text in PASS_MARKS:
         return '通过'
     if text in PARTIAL_MARKS:
         return '部分'
     if text in FAIL_MARKS:
         return '未通过'
+    if any(word in raw for word in FAIL_WORDS):
+        return '未通过'
+    if any(word in raw for word in PARTIAL_WORDS):
+        return '部分'
     return '未识别'
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='统计问答层评测')
-    parser.add_argument('--csv', default=str(DEFAULT_CSV))
+    parser.add_argument(
+        '--file',
+        default=None,
+        help='评测明细文件；默认优先用 xlsx，没有才退回 csv',
+    )
     args = parser.parse_args()
 
-    path = Path(args.csv)
-    rows = read_rows(path)
+    if args.file:
+        path = Path(args.file)
+    elif DEFAULT_XLSX.exists():
+        path = DEFAULT_XLSX
+    else:
+        path = DEFAULT_CSV
+    rows = read_table(path)
     if not rows:
         print('表是空的')
         return 1
@@ -148,6 +195,20 @@ def main() -> int:
         if noted == 0:
             print('    ⚠️ 一条备注都没有 —— 判卷时没有任何存疑的地方，'
                   '这种事在 120 题里很少见，值得回头看一眼。')
+
+    # 把没通过的逐条列出来，**并且把判卷人写的原因原样带出来**。
+    # 原因比结论重要：结论说"有 9 题没过"，原因才说明下一步该改什么。
+    not_passed = [row for row, verdict in verdicts if verdict != '通过']
+    if not_passed:
+        print()
+        print(f'  没通过的 {len(not_passed)} 题：')
+        for row in not_passed:
+            reason = (row.get(judge_col) or '').strip()
+            print(f'    {row.get("编号"):<7} {verdict_of(reason)}  '
+                  f'依据={row.get("依据强度"):<14} {reason}')
+            detail = (row.get(note_col) or '').strip() if note_col else ''
+            if detail:
+                print(f'            {detail[:110]}')
     print()
 
     # ---- 边界层：必须成对看 ----

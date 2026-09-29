@@ -14,20 +14,38 @@
 "模型是否和模型一致"，永远显示满分。
 
 用法：
-    python 评测/跑问答评测.py                 # 全跑（42 题，会调大模型，有费用与耗时）
+    python 评测/跑问答评测.py                 # 全跑（120 题，会调大模型，有费用与耗时）
     python 评测/跑问答评测.py --only D8       # 只跑某一维度
     python 评测/跑问答评测.py --limit 3       # 先跑 3 题看看格式
+
+## 为什么落盘用 xlsx，不用 csv
+
+这张表是**给人判的**：人拿 Excel / WPS 打开、填一列、保存。
+而 Excel 保存 CSV 时会按本地编码写（这台机器上是 GBK），
+脚本下一次按 UTF-8 读就会 `UnicodeDecodeError` ——**看起来像文件坏了**，
+其实只是编码被换掉了。（踩过一次，就在这份文件上。）
+
+xlsx 里字符串是 UTF-8 存的、和编码无关，所以**这张表和评测集一样，xlsx 是唯一源**。
+
+## 重跑不会冲掉你判过的结果
+
+跑之前会先读一遍现有的 xlsx，把每一题的「人工判定」和「备注」按**编号**记下来；
+跑完再**填回**去（前提是那一题的**问题文本没变**——题都换了，旧的判定就没意义了）。
+
+这一步是必须的：这个脚本一跑就是 120 次模型调用，
+而重跑的场景恰恰是"改了检索或提示词，想再看一遍答案"——
+如果每次都把人判过的 120 格清空，那就没人会愿意重跑。
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'backend'))
+sys.path.insert(0, str(ROOT / '工具'))
 
 # Windows 控制台默认 GBK，打印带 emoji 的进度会**直接崩在打印那一步**。
 # （同一个坑刚在 跑检索评测.py 上踩过一次，那次是已经花完钱才崩的。）
@@ -38,9 +56,11 @@ except Exception:  # noqa: BLE001
 
 from app.core.postgres import get_session_factory  # noqa: E402
 from app.services.qa_service import QaService  # noqa: E402
+from 写表格 import write_xlsx  # noqa: E402
+from 读取表格 import read_xlsx  # noqa: E402
 from 评测集 import load_rows, pick  # noqa: E402
 
-RESULT_FILE = ROOT / '评测' / '问答评测明细.csv'
+RESULT_FILE = ROOT / '评测' / '问答评测明细.xlsx'
 
 OUTPUT_COLUMNS = [
     '编号', '维度', '问题', '期望行为', '参考答案要点',
@@ -74,6 +94,37 @@ def main() -> int:
 
     results: list[dict] = []
 
+    # ---- 先把已有的判定读回来 ----
+    # 按（编号 + 问题）匹配：编号对得上、问题文本也一致，才认那格判定。
+    # 题换了就不认——旧判定对应的是旧问题，硬填回去比空着更危险。
+    previous: dict[tuple[str, str], tuple[str, str]] = {}
+    if RESULT_FILE.exists():
+        try:
+            table = read_xlsx(RESULT_FILE)
+            header = table[0]
+            judge_at = next(
+                (i for i, name in enumerate(header) if '人工判定' in (name or '')), None
+            )
+            note_at = next(
+                (i for i, name in enumerate(header) if '备注' in (name or '')), None
+            )
+            for raw in table[1:]:
+                cells = list(raw) + [''] * (len(header) - len(raw))
+                code = cells[header.index('编号')]
+                question = cells[header.index('问题')]
+                if code:
+                    previous[(code, question)] = (
+                        cells[judge_at] if judge_at is not None else '',
+                        cells[note_at] if note_at is not None else '',
+                    )
+            kept = sum(1 for value in previous.values() if (value[0] or '').strip())
+            print(f'读回上次的判定：{len(previous)} 条记录，其中已判过的 {kept} 题')
+            print()
+        except Exception as exc:  # noqa: BLE001
+            # 读不回来就照常跑，只是判定列会是空的——不能因为"上一份坏了"就不干活。
+            print(f'（上次的 {RESULT_FILE.name} 读不回来：{type(exc).__name__}，判定列会空着）')
+            print()
+
     def flush() -> None:
         """每跑完一题就落盘一次。
 
@@ -85,14 +136,18 @@ def main() -> int:
         代价是每写一次整表（120 行，微不足道）。用一点 IO 换"崩了不丢钱"，
         这笔账没有任何犹豫的余地。
 
-        ⚠️ 用 'w' 覆盖写整表，而不是追加：整表重写天然幂等，
-        跑第二遍不会留下上一遍的残行。
+        ⚠️ 整表重写而不是追加：幂等，跑第二遍不会留下上一遍的残行。
+        而"重写会不会把人工判定冲掉"这个问题由上面的 `previous` 解决——
+        每次写之前都把读回来的判定填回对应的行。
         """
 
-        with RESULT_FILE.open('w', encoding='utf-8', newline='') as handle:
-            writer = csv.DictWriter(handle, fieldnames=OUTPUT_COLUMNS)
-            writer.writeheader()
-            writer.writerows(results)
+        table = [OUTPUT_COLUMNS]
+        for item in results:
+            carried = previous.get((item['编号'], item['问题']), ('', ''))
+            item['人工判定[待你填]'] = carried[0]
+            item['备注[待你填]'] = carried[1]
+            table.append([str(item.get(name, '')) for name in OUTPUT_COLUMNS])
+        write_xlsx(RESULT_FILE, table, title='问答评测明细')
 
     session_factory = get_session_factory()
     with session_factory() as session:
