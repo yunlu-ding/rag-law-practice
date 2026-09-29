@@ -40,6 +40,7 @@ xlsx 里字符串是 UTF-8 存的、和编码无关，所以**这张表和评测
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -60,6 +61,8 @@ from 写表格 import write_xlsx  # noqa: E402
 from 读取表格 import read_xlsx  # noqa: E402
 from 评测集 import load_rows, pick  # noqa: E402
 
+logger = logging.getLogger(__name__)
+
 RESULT_FILE = ROOT / '评测' / '问答评测明细.xlsx'
 
 OUTPUT_COLUMNS = [
@@ -71,9 +74,16 @@ OUTPUT_COLUMNS = [
     #   · 依据强度 = degraded 时答案质量天然弱一档，判"引用是否支撑结论"
     #     要把这个前提带上看。
     '是否拒答', '拒答种类', '依据强度', '依据提醒',
-    '系统结论', '系统条款', '系统理由', '引用条数', '未还原引用', '引用来源', '错误',
+    '系统结论', '系统条款', '系统理由', '引用条数', '未还原引用', '无依据条款',
+    '引用来源', '错误',
     '人工判定[待你填]', '备注[待你填]',
 ]
+
+# 只重跑指定编号时，**必须写到另一个文件**。
+#
+# 否则一次"针对 9 道失败题"的重跑会把 120 题的整张表覆盖成 9 行——
+# 那是"重跑"这个动作最不该有的副作用。
+REVIEW_FILE = ROOT / '评测' / '问答评测复评.xlsx'
 
 
 def main() -> int:
@@ -81,15 +91,28 @@ def main() -> int:
     parser.add_argument('--top-k', type=int, default=5)
     parser.add_argument('--only', default=None, help='只跑编号以它开头的题（如 D8）')
     parser.add_argument('--limit', type=int, default=None, help='只跑前 N 题')
+    parser.add_argument(
+        '--codes',
+        default=None,
+        help='只跑指定编号，逗号分隔（如 D5-01,D6-04）。结果写到 问答评测复评.xlsx，不覆盖原表',
+    )
     args = parser.parse_args()
 
     rows = load_rows()
+    if args.codes:
+        wanted = {item.strip() for item in args.codes.split(',') if item.strip()}
+        rows = [row for row in rows if pick(row, 'code') in wanted]
+        missing = wanted - {pick(row, 'code') for row in rows}
+        if missing:
+            print(f'⚠️ 这些编号在评测集里找不到：{sorted(missing)}')
     if args.only:
         rows = [row for row in rows if pick(row, 'code').startswith(args.only)]
     if args.limit:
         rows = rows[: args.limit]
 
+    result_file = REVIEW_FILE if args.codes else RESULT_FILE
     print(f'待跑 {len(rows)} 题（每题会调用一次大模型）')
+    print(f'结果写到：{result_file.name}')
     print()
 
     results: list[dict] = []
@@ -98,9 +121,9 @@ def main() -> int:
     # 按（编号 + 问题）匹配：编号对得上、问题文本也一致，才认那格判定。
     # 题换了就不认——旧判定对应的是旧问题，硬填回去比空着更危险。
     previous: dict[tuple[str, str], tuple[str, str]] = {}
-    if RESULT_FILE.exists():
+    if result_file.exists():
         try:
-            table = read_xlsx(RESULT_FILE)
+            table = read_xlsx(result_file)
             header = table[0]
             judge_at = next(
                 (i for i, name in enumerate(header) if '人工判定' in (name or '')), None
@@ -122,7 +145,7 @@ def main() -> int:
             print()
         except Exception as exc:  # noqa: BLE001
             # 读不回来就照常跑，只是判定列会是空的——不能因为"上一份坏了"就不干活。
-            print(f'（上次的 {RESULT_FILE.name} 读不回来：{type(exc).__name__}，判定列会空着）')
+            print(f'（上次的 {result_file.name} 读不回来：{type(exc).__name__}，判定列会空着）')
             print()
 
     def flush() -> None:
@@ -141,13 +164,47 @@ def main() -> int:
         每次写之前都把读回来的判定填回对应的行。
         """
 
-        table = [OUTPUT_COLUMNS]
+        fresh: dict[str, dict[str, str]] = {}
         for item in results:
             carried = previous.get((item['编号'], item['问题']), ('', ''))
             item['人工判定[待你填]'] = carried[0]
             item['备注[待你填]'] = carried[1]
-            table.append([str(item.get(name, '')) for name in OUTPUT_COLUMNS])
-        write_xlsx(RESULT_FILE, table, title='问答评测明细')
+            fresh[item['编号']] = item
+
+        # ---- 增量合并 ----
+        #
+        # 只跑几道题时（--codes），**不能把整张表覆盖成刚跑的那几行**。
+        # "补跑一道漏掉的题"是很自然的动作，而它最不该有的副作用
+        # 就是把同一次复评里其它题的结果抹掉。
+        #
+        # 所以：已有的其它行原样保留，刚跑的那些按编号**替换**进去；
+        # 文件里还没有的追加到末尾。第一遍的全量结果在另一个文件里，不受影响。
+        merged_rows: list[dict[str, str]] = []
+        if args.codes and result_file.exists():
+            try:
+                existing = read_xlsx(result_file)
+                header = existing[0]
+                code_at = header.index('编号')
+                for raw in existing[1:]:
+                    cells = list(raw) + [''] * (len(header) - len(raw))
+                    code = cells[code_at]
+                    # 刚跑过的用新的替换，其余的（包括人工判定）原样留下
+                    merged_rows.append(
+                        fresh.pop(code) if code in fresh else dict(zip(header, cells))
+                    )
+                merged_rows.extend(fresh.values())
+            except Exception:  # noqa: BLE001
+                # 合并失败就退化成"只写本次跑的那几行"，并留下痕迹。
+                # 静默退化会让下一次补跑把上一次的结果抹掉而没人知道。
+                logger.warning('[QA评测] 合并已有复评结果失败，本次只写刚跑的几行')
+                merged_rows = list(fresh.values())
+        else:
+            merged_rows = list(fresh.values())
+
+        table = [OUTPUT_COLUMNS] + [
+            [str(row.get(name, '')) for name in OUTPUT_COLUMNS] for row in merged_rows
+        ]
+        write_xlsx(result_file, table, title='问答评测明细')
 
     session_factory = get_session_factory()
     with session_factory() as session:
@@ -181,6 +238,7 @@ def main() -> int:
                     # 就不知道有没有编造出处。两者都是"可信"这两个字的一半。
                     '引用条数': len(outcome.citations or []),
                     '未还原引用': '｜'.join(outcome.unknown_citations or []),
+                    '无依据条款': '｜'.join(outcome.unsupported_clauses or []),
                     '引用来源': citations,
                     '错误': outcome.error or (
                         f'拒答：{outcome.refusal_reason}' if outcome.refused else ''
@@ -201,7 +259,12 @@ def main() -> int:
             flush()
 
     print()
-    print(f'已写入 {RESULT_FILE}')
+    # 打的是**实际写入的那个文件**。之前这里写死了 RESULT_FILE，
+    # 于是定向复评明明写进了「问答评测复评.xlsx」，提示却说写进了原表——
+    # 而"我以为它改了原表 / 我以为它没改原表"这两种误判，代价都很大。
+    print(f'已写入 {result_file}')
+    if args.codes:
+        print(f'注意：这次是定向复评（只跑了 {len(rows)} 题），原表 {RESULT_FILE.name} 未被改动。')
     print()
     print('接下来是你的活：打开这份表，逐题对照「参考答案要点」，在')
     print('「人工判定[待你填]」里填 通过 / 部分 / 未通过，有疑问写进备注。')

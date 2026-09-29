@@ -10,6 +10,7 @@ from app.core.embeddings import embed_query
 from app.core.vector_store import get_vector_store
 from app.rag.bm25_index import get_bm25_index
 from app.rag.reranker import rerank
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -283,7 +284,8 @@ def retrieve(
         protect=int(settings.rerank_diversity_protect or 0),
     )
 
-    outcome.hits = [_with_effect_labels(hit) for hit in final_hits]
+    document_meta = _load_document_meta(db, final_hits)
+    outcome.hits = [_with_effect_labels(hit, document_meta) for hit in final_hits]
     outcome.exact_hit_count = len(exact_hits)
     logger.info(
         '[RETRIEVE] 完成: query=%r 向量=%s 关键词=%s 融合=%s 返回=%s 耗时=%s',
@@ -485,7 +487,79 @@ def _merge_exact_hits(
     return exact_hits + remainder[:keep]
 
 
-def _with_effect_labels(hit: dict[str, Any]) -> dict[str, Any]:
+def _cn_date(value: Any) -> str | None:
+    """把日期渲染成"2017年7月1日"。
+
+    为什么要转成人话：模型看到的应该是人读得懂的东西。
+    `date(2017, 7, 1)` 这种写法它当然也能理解，但**用户最后看到的引用里
+    会带上这一串**，而"2017-07-01"在一份中文合规材料里是突兀的。
+    在检索层一次转好，下游（提示词、引用展示）都不用再各转一遍。
+    """
+
+    if value is None:
+        return None
+    try:
+        return f'{value.year}年{value.month}月{value.day}日'
+    except AttributeError:
+        return str(value) or None
+
+
+def _load_document_meta(
+    db: Session | None,
+    hits: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """按 document_id 取文档级元数据（公布日期 / 施行日期 / 文号）。
+
+    为什么在这里补，而不是**预先塞进向量库**：
+
+    这些字段本来就在关系库里，而且是**人工核对过**的（`语料元数据核对.json`）。
+    塞进向量库意味着以后每改一次元数据，都要重建索引、再花一次 embedding 的钱；
+    而挂在检索结果上，一次查询只多一条 `WHERE id IN (...)`，成本可以忽略。
+
+    **这条是被一次真实的失败逼出来的**：用户问"《证券期货投资者适当性管理办法》
+    什么时候开始施行的"，系统回答"未在检索片段中直接写出施行日期"——
+    它没有说错，**它说的是实话**：施行日期早就抽出来了、就存在文档元数据里，
+    只是没有跟着检索结果一起交给它。于是三道同类题全部答不出来。
+    """
+
+    if db is None or not hits:
+        return {}
+
+    ids = {str(hit.get('document_id')) for hit in hits if hit.get('document_id')}
+    if not ids:
+        return {}
+
+    try:
+        from app.models.document import Document
+
+        rows = db.execute(
+            select(
+                Document.id,
+                Document.doc_number,
+                Document.issued_date,
+                Document.effective_date,
+            ).where(Document.id.in_(ids))
+        ).all()
+    except Exception:  # noqa: BLE001
+        # 补元数据失败不该影响检索本身——最多是回答里少了日期，
+        # 而不是这次检索作废。
+        logger.exception('[RETRIEVE] 读取文档元数据失败')
+        return {}
+
+    return {
+        str(row[0]): {
+            'doc_number': row[1],
+            'issued_date_label': _cn_date(row[2]),
+            'effective_date_label': _cn_date(row[3]),
+        }
+        for row in rows
+    }
+
+
+def _with_effect_labels(
+    hit: dict[str, Any],
+    document_meta: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """给检索结果补上"效力层级 / 效力状态"的中文标签，以及**分数的来源**。
 
     为什么要在这里补，而不是让提示词模块自己翻译：
@@ -518,6 +592,15 @@ def _with_effect_labels(hit: dict[str, Any]) -> dict[str, Any]:
     enriched['validity_label'] = VALIDITY_LABELS.get(
         str(hit.get('validity') or 'effective'), '效力未知'
     )
+
+    # 文档级的日期与文号。它们回答的是"这份法规什么时候公布、什么时候施行"——
+    # 而这类问题**在正文里往往找不到**（施行日期写在公告落款，不在条文里），
+    # 所以它不是可有可无的装饰，是唯一能回答那一类问题的东西。
+    meta = (document_meta or {}).get(str(hit.get('document_id'))) or {}
+    for field in ('doc_number', 'issued_date_label', 'effective_date_label'):
+        value = meta.get(field) or hit.get(field)
+        if value:
+            enriched[field] = value
 
     sources = hit.get('retrieval_sources') or []
     if sources == ['exact']:

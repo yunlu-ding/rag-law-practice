@@ -52,6 +52,15 @@ class QaLog(Base, TimestampMixin):
         nullable=False,
         comment='模型引用了不存在的片段 ID —— 这是一次可检测的编造',
     )
+    # 「条款」字段里那些**引用的片段中根本没出现**的条款编号。
+    # 和 unknown_citations 是一对孪生指标，防的是两种不同的编造：
+    #   前者编片段编号，后者编条款编号——而后者看起来更像依据，更隐蔽。
+    unsupported_clauses: Mapped[list[str]] = mapped_column(
+        JSON,
+        default=list,
+        nullable=False,
+        comment='「条款」字段里无依据的条款编号（引用的片段里没有它）',
+    )
 
     refused: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, comment='是否走了拒答分支'

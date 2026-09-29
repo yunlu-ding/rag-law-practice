@@ -31,8 +31,20 @@
 
 用法：
     python 工具/统计问答评测.py
-    python 工具/统计问答评测.py
     python 工具/统计问答评测.py --file 评测/问答评测明细.xlsx
+    python 工具/统计问答评测.py --review 评测/问答评测复评.xlsx
+
+⚠️ **第三个用法才是"修复之后"的数字。** 这一层的数据天然是两次的：
+
+    问答评测明细.xlsx   —— 第一轮的完整 120 题（基线）
+    问答评测复评.xlsx   —— 修完之后**只重跑有问题的那几道**
+
+合并口径：以第一轮的 120 题为基础，**用复评里重跑过的题按编号覆盖**，
+其余保持不变。这才叫"当前系统在 120 题上的表现"。
+
+**为什么不直接拿复评文件算**：那个文件只有十几行，算出来是
+"那十几道题的通过率"，不是整体。两个数都有意义，但**必须说清是哪一个**——
+否则很容易拿十几道题的百分比去替整体背书。
 """
 
 from __future__ import annotations
@@ -76,7 +88,18 @@ FAIL_MARKS = {'未通过', '×', 'x', '否', 'no', '0', '不通过', '错误'}
 #
 # 判不出来的写法仍然单独列出来并计为未通过：宁可把数字算低。
 FAIL_WORDS = ('错误', '未命中', '不支撑', '不匹配', '矛盾', '不对', '答非所问', '幻觉', '编造', '相反')
-PARTIAL_WORDS = ('不完整', '有歧义', '部分', '遗漏', '不全', '不充分')
+PARTIAL_WORDS = ('不完整', '未完整', '有歧义', '部分', '遗漏', '不全', '不充分')
+
+# 判定格里**写了整句话**时怎么算。
+#
+# 实测拿到的是这样的写法：
+#     「系统条款写"第五十条"，但理由仍说"检索片段中未载明第五十条的具体内容"…」
+#     「系统只确认了…1 部，并明确说"知识库中未完整列明其余7部规章名称"」
+#
+# 它不是符号，也没出现上面那些关键词，但它显然是"为什么这道题不行"——
+# **判卷人写长句子，就是在说明问题**（通过的话没必要写这么长）。
+# 所以超过这个长度、又不是以"通过"开头的，一律按未通过计，并且单独列出来。
+LONG_TEXT_AS_FAIL = 12
 
 
 def read_table(path: Path) -> list[dict[str, str]]:
@@ -121,9 +144,11 @@ def verdict_of(value: str) -> str:
 
     raw = (value or '').strip()
     text = raw.lower()
-    if text in PASS_MARKS:
+    # 先看**开头**：人会写成"通过""通过，但引用可以更精确"。
+    # 只做全等比较的话，后半句一加就落到"未识别"里，方向就反了。
+    if text in PASS_MARKS or any(text.startswith(mark) for mark in PASS_MARKS):
         return '通过'
-    if text in PARTIAL_MARKS:
+    if text in PARTIAL_MARKS or any(text.startswith(mark) for mark in PARTIAL_MARKS):
         return '部分'
     if text in FAIL_MARKS:
         return '未通过'
@@ -131,6 +156,8 @@ def verdict_of(value: str) -> str:
         return '未通过'
     if any(word in raw for word in PARTIAL_WORDS):
         return '部分'
+    if len(raw) >= LONG_TEXT_AS_FAIL:
+        return '未通过'
     return '未识别'
 
 
@@ -140,6 +167,11 @@ def main() -> int:
         '--file',
         default=None,
         help='评测明细文件；默认优先用 xlsx，没有才退回 csv',
+    )
+    parser.add_argument(
+        '--review',
+        default=None,
+        help='复评结果文件。给了它就会输出"第一轮 → 复评后"的对比',
     )
     args = parser.parse_args()
 
@@ -266,7 +298,86 @@ def main() -> int:
         n = sum(counter.values())
         print(f'    {dim:<10} {counter["通过"]:>3} / {n:<3} 通过')
 
+    # ---- 复评合并：第一轮 + 只重跑过的那几题 ----
+    if args.review:
+        review_path = Path(args.review)
+        if not review_path.exists():
+            print()
+            print(f'找不到复评文件：{review_path}')
+            return 1
+        review_rows = read_table(review_path)
+        review_judge = find_column(review_rows[0], '人工判定')
+        merged = merge_review(rows, review_rows, judge_col, review_judge)
+        print_rounds(rows, merged, judge_col, review_judge, review_path.name)
+
     return 0
+
+
+def verdicts_of(rows: list[dict[str, str]], judge_col: str) -> dict[str, str]:
+    return {str(row.get('编号')): verdict_of(row.get(judge_col) or '') for row in rows}
+
+
+def merge_review(
+    base: list[dict[str, str]],
+    review: list[dict[str, str]],
+    base_judge: str,
+    review_judge: str | None,
+) -> list[dict[str, str]]:
+    """以第一轮为基础，用复评里重跑过的题按编号覆盖。
+
+    覆盖的是**整行**（含答案正文），不只是判定——因为复评的意义就是
+    "修改之后同一道题的回答变了没有"，回答本身才是被验证的东西。
+    """
+
+    by_code = {str(row.get('编号')): row for row in review}
+    return [by_code.get(str(row.get('编号')), row) for row in base]
+
+
+def print_rounds(
+    base: list[dict[str, str]],
+    merged: list[dict[str, str]],
+    base_judge: str,
+    review_judge: str | None,
+    review_name: str,
+) -> None:
+    """输出"第一轮 → 复评后"的对比，以及哪些题变了、哪些还没过。"""
+
+    before = verdicts_of(base, base_judge)
+    after = verdicts_of(merged, base_judge)
+    total = len(base)
+
+    print()
+    print('=' * 66)
+    print(f'复评合并（{review_name}）：第一轮 → 复评后')
+    print('=' * 66)
+
+    first_pass = sum(1 for value in before.values() if value == '通过')
+    final_pass = sum(1 for value in after.values() if value == '通过')
+    print(f'  第一轮     {first_pass} / {total} = {first_pass / total:.2%}')
+    print(f'  复评后     {final_pass} / {total} = {final_pass / total:.2%}')
+    print(f'  净变化     {final_pass - first_pass:+d} 题')
+    print()
+
+    changed = [code for code in before if before[code] != after[code]]
+    fixed = [code for code in changed if after[code] == '通过']
+    broke = [code for code in changed if before[code] == '通过']
+    print(f'  变好的 {len(fixed)} 题：{", ".join(sorted(fixed)) or "无"}')
+    print(f'  变差的 {len(broke)} 题：{", ".join(sorted(broke)) or "无"}')
+    if not changed:
+        print('  （没有任何题的判定发生变化）')
+
+    still = sorted(code for code, value in after.items() if value != '通过')
+    print()
+    print(f'  仍然没通过的 {len(still)} 题：')
+    review_by_code = {str(row.get('编号')): row for row in merged}
+    for code in still:
+        row = review_by_code.get(code, {})
+        print(f'    {code:<7} {row.get("维度", ""):<8} {row.get("问题", "")[:30]}')
+
+    judged_missing = [code for code in after if after[code] == '未识别']
+    if judged_missing:
+        print()
+        print(f'  ⚠️ 判定没认出来的 {len(judged_missing)} 题：{", ".join(sorted(judged_missing))}')
 
 
 if __name__ == '__main__':

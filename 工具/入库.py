@@ -38,6 +38,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'backend'))
 
+# Windows 控制台默认按 GBK 解码，而这个脚本会打印 ✅/⚠️ 这类符号——
+# 不加保护的话，它会**直接崩在打印那一步**，而崩溃点常常在干完活之后
+# （评测跑完了、钱花完了，明细一条都没落盘）。详见 工具/修控制台编码.py。
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except Exception:  # noqa: BLE001
+    pass
+
 logging.getLogger('pypdf').setLevel(logging.ERROR)
 
 from sqlalchemy import delete, select  # noqa: E402

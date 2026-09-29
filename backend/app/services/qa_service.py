@@ -82,6 +82,13 @@ class QaOutcome:
     assumption: str | None = None
     citations: list[dict[str, Any]] = field(default_factory=list)
     unknown_citations: list[str] = field(default_factory=list)
+    # 「条款」字段里出现的、但**引用的片段里根本没有**的条款号。
+    #
+    # 它和 `unknown_citations` 是一对孪生指标，防的却是两种不同的编造：
+    #   · unknown_citations  —— 编了片段编号（"我用了第 7 段"，可只有 5 段）；
+    #   · unsupported_clauses —— 编了条款编号（"依据第五十条"，可引的片段里没有第五十条）。
+    # 后者更隐蔽：它看起来特别可信，因为它长得就像法条号。
+    unsupported_clauses: list[str] = field(default_factory=list)
     parse_ok: bool = True
     retrieval_failed: bool = False
     raw_output: str | None = None
@@ -224,6 +231,11 @@ class QaService:
                 'article_number': hit.get('article_number'),
                 'legal_level_label': hit.get('legal_level_label'),
                 'validity_label': hit.get('validity_label'),
+                # 文档级日期与文号。少了它们，问"这部法规什么时候施行"的题
+                # 只能得到"检索片段中未写出"——而信息其实一直就在库里。
+                'doc_number': hit.get('doc_number'),
+                'issued_date_label': hit.get('issued_date_label'),
+                'effective_date_label': hit.get('effective_date_label'),
                 'retrieval_sources': hit.get('retrieval_sources') or [],
             }
             for index, hit in enumerate(retrieval.hits, start=1)
@@ -269,6 +281,15 @@ class QaService:
             outcome.citations, outcome.unknown_citations = _restore_citations(
                 parsed.get('依据片段'), retrieval.hits
             )
+            outcome.unsupported_clauses = _unsupported_clauses(
+                outcome.clause, outcome.citations
+            )
+            if outcome.unsupported_clauses:
+                logger.warning(
+                    '[QA] 条款号无依据（引用的片段里没有这些条）: %s question=%r',
+                    outcome.unsupported_clauses,
+                    outcome.question,
+                )
 
         # ---- 第二道闸门：模型自己说"无法判断" ----
         if outcome.conclusion == '无法判断':
@@ -367,6 +388,7 @@ class QaService:
                 assumption=outcome.assumption,
                 citations=outcome.citations,
                 unknown_citations=outcome.unknown_citations,
+                unsupported_clauses=outcome.unsupported_clauses,
                 refused=outcome.refused,
                 refusal_reason=outcome.refusal_reason,
                 refusal_kind=outcome.refusal_kind,
@@ -387,6 +409,62 @@ class QaService:
             self.db.rollback()
             logger.exception('[QA] 问答记录写入失败（回答本身仍然返回给用户）')
             return None
+
+
+_ARTICLE_TOKEN = re.compile(r'第[一二三四五六七八九十百零〇\d]+条')
+
+
+def _unsupported_clauses(
+    clause: str | None,
+    citations: list[dict[str, Any]],
+) -> list[str]:
+    """「条款」里写了、但**引用的片段里找不到**的条款号。
+
+    这是"引用可核对"这条设计里**最后一块没堵上的地方**。
+
+    引用片段早就做了后端还原 + 编造检测（模型说"我用了第 7 段"，
+    可只召回了 5 段，当场就能抓住）。但「条款」这个字段一直是模型**自由写的**——
+    而它恰恰是最像"依据"的那个东西：用户看到"依据《某某办法》第五十条"
+    就会当成核对过了。
+
+    实测两次（判卷时发现的）：
+      · 结论写"第五十条"，可理由自己说"未载明第五十条"、实际引用的是第一百三十五条；
+      · 写"第十六条"，而第十六条讲的是"了解产品"，与问题（违规后果）不相干。
+
+    比对按**数值**而不是字符串：模型写"第29条"、原文写"第二十九条"是同一件事，
+    按字面比会误报。（这个坑在条款直查那边踩过，这里用同样的办法避掉。）
+    """
+
+    if not clause or not citations:
+        return []
+
+    from app.rag.splitters.legal import chinese_number_to_int
+
+    claimed_tokens = _ARTICLE_TOKEN.findall(str(clause))
+    if not claimed_tokens:
+        return []
+
+    supported_numbers: set[int] = set()
+    for citation in citations:
+        # 片段正文里出现的条号（条文开头就写着自己的条号）
+        for token in _ARTICLE_TOKEN.findall(str(citation.get('text') or '')):
+            number = chinese_number_to_int(token)
+            if number is not None:
+                supported_numbers.add(number)
+        # 切片自带的条号字段。跨页续片的正文里可能没有条号（靠父条号继承），
+        # 只看正文会把它误判成"没有依据"。
+        inherited = citation.get('article_number')
+        if inherited:
+            number = chinese_number_to_int(str(inherited))
+            if number is not None:
+                supported_numbers.add(number)
+
+    unsupported: list[str] = []
+    for token in claimed_tokens:
+        number = chinese_number_to_int(token)
+        if number is None or number not in supported_numbers:
+            unsupported.append(token)
+    return unsupported
 
 
 def _refusal_message(decision: RefusalDecision) -> str:

@@ -74,6 +74,10 @@ class AskResponse(BaseModel):
         default_factory=list,
         description='模型引用了不存在的片段编号 —— 可检测的编造',
     )
+    unsupported_clauses: list[str] = Field(
+        default_factory=list,
+        description='「条款」里出现的、但引用的片段中根本没有的条款编号 —— 另一种可检测的编造',
+    )
     parse_ok: bool = Field(description='模型输出是否解析成功')
     retrieval_failed: bool = Field(
         default=False,
@@ -163,6 +167,7 @@ def ask(request: AskRequest, db: Session = Depends(get_database)) -> AskResponse
         assumption=outcome.assumption,
         citations=[Citation.model_validate(item) for item in outcome.citations],
         unknown_citations=outcome.unknown_citations,
+        unsupported_clauses=outcome.unsupported_clauses,
         parse_ok=outcome.parse_ok,
         retrieval_failed=outcome.retrieval_failed,
         retrieval=outcome.retrieval,
