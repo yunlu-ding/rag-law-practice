@@ -62,9 +62,14 @@ TITLE_TAIL = re.compile(r'(办法|规定|细则|指引|规则|准则|决定)$')
 
 
 def find_gazette() -> Path:
-    for path in CORPUS.iterdir():
-        if path.is_file() and '202' in path.name and path.suffix.lower() == '.html':
-            return path
+    # 先去存档目录找。公报的**原始文件**放在 语料/_原始件/（它不作为语料入库，
+    # 入库的是从这里拆分出来的每一部规章），所以不能只扫 语料/ 的顶层。
+    for folder in (CORPUS / '_原始件', CORPUS):
+        if not folder.is_dir():
+            continue
+        for path in folder.iterdir():
+            if path.is_file() and '202' in path.name and path.suffix.lower() == '.html':
+                return path
     raise FileNotFoundError('语料目录里没找到公报文件')
 
 

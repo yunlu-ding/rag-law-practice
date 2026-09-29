@@ -311,6 +311,23 @@ _HTML_CONTENT_HINT = re.compile(r'(^|[\s_-])(content|article|main|text|zoom|body
 # 章节标题。用它把正文切成 section，让"第几章"成为可展示的定位信息。
 _CHINESE_CHAPTER = re.compile(r'^第([一二三四五六七八九十百零〇\d]+)章\s*(.*)$')
 
+# 页面导航的"面包屑"，以及站点自己用来标记它的边界词。
+#
+# 中国政府网的页面会把面包屑放进正文容器里，于是它跟着正文一起被抽了出来：
+#
+#     面包屑开始
+#     首页 > 国务院公报 > 2023年第5号
+#     字号：默认大超大 | 打印 | share
+#     面包屑结束
+#     中国证券监督管理委员会令
+#     第 202 号
+#     ……
+#
+# 这几行是**站点自己划定的**边界（它就是这么命名的），照办最稳——
+# 比用正则去猜"哪一行像导航"准得多。
+_BREADCRUMB_START = '面包屑开始'
+_BREADCRUMB_END = '面包屑结束'
+
 
 def _html_paragraphs(node) -> list[str]:
     """把一个 DOM 节点拍平成"段落列表"。
@@ -345,7 +362,32 @@ def _html_paragraphs(node) -> list[str]:
 
     walk(node)
     flush()
-    return paragraphs
+    return _drop_breadcrumb(paragraphs)
+
+
+def _drop_breadcrumb(paragraphs: list[str]) -> list[str]:
+    """丢掉站点自己标出来的导航区。
+
+    只处理"开始和结束标记都出现"的情况；只出现一个时不猜——
+    猜错会把正文切掉一块，而这个代价比留四行导航大得多。
+    """
+
+    start = next(
+        (index for index, line in enumerate(paragraphs) if _BREADCRUMB_START in line), None
+    )
+    if start is None:
+        return paragraphs
+    end = next(
+        (
+            index
+            for index in range(start, len(paragraphs))
+            if _BREADCRUMB_END in paragraphs[index]
+        ),
+        None,
+    )
+    if end is None:
+        return paragraphs
+    return paragraphs[:start] + paragraphs[end + 1 :]
 
 
 def _pick_html_container(tree) -> tuple[object, str, int]:

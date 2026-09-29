@@ -126,12 +126,24 @@ def main() -> int:
     parser.add_argument('--apply', action='store_true', help='真正执行；不加则只演练')
     parser.add_argument('--clear-db', action='store_true', help='入库前清空现有文档')
     parser.add_argument('--force', action='store_true', help='忽略幂等检查，强制重跑')
+    parser.add_argument(
+        '--prune',
+        action='store_true',
+        help='删掉库里那些**语料目录已经不再包含**的文档，让库和目录保持一致',
+    )
     parser.add_argument('--only', default=None, help='只处理文件名包含该关键字的文件')
     args = parser.parse_args()
 
-    items = iter_corpus()
-    if args.only:
-        items = [item for item in items if args.only in item[1].name]
+    # 完整的语料清单。**任何"判断库里该有什么"的逻辑都必须基于它**，
+    # 而不是基于下面那个被 --only 过滤过的列表。
+    #
+    # 这里踩过一个代价不小的坑：--prune 一开始用的是过滤后的 items，
+    # 于是 `--only 某文件 --prune` 会认为"语料里只应该有这一份"，
+    # 把另外 20 份全删了。**拿过滤后的输入去当完整的事实，是这类错误的通用形状。**
+    all_items = iter_corpus()
+    items = (
+        [item for item in all_items if args.only in item[1].name] if args.only else all_items
+    )
 
     if not items:
         print('语料目录里没有待入库的文件。')
@@ -159,6 +171,30 @@ def main() -> int:
             clear_database(session)
         print()
 
+    if args.prune:
+        # 把库里"语料目录已经没有的文件"清掉。
+        #
+        # 为什么需要它：语料是会变的——删掉一份不该收录的文件、
+        # 换掉一份旧版本，都是常规操作。而入库脚本只会**增加和更新**，
+        # 不会发现"这个文件已经从目录里消失了"。
+        # 结果是库里留着一份语料目录里不存在的文档，它照样会被检索到、
+        # 被引用，而用户去目录里根本找不到它。
+        expected = {path.name for _folder, path in all_items}
+        with session_factory() as session:
+            service = DocumentService(session)
+            stale = [
+                document
+                for document in service.list_documents(limit=1000)
+                if document.knowledge_base == KNOWLEDGE_BASE
+                and document.filename not in expected
+            ]
+            for document in stale:
+                print(f'[清理] {document.filename}（语料目录里已不存在）')
+                service.delete_document(document.id)
+            if stale:
+                print(f'共清理 {len(stale)} 份')
+                print()
+
     results: list[tuple[str, str, str]] = []
 
     for folder_name, path in items:
@@ -174,12 +210,25 @@ def main() -> int:
                 print(f'[跳过] {path.name}（内容未变化）')
                 continue
 
-            if existing:
-                # 同内容但上次没跑完：把旧记录清掉重来，避免留下半截数据。
+            # ---- 按**文件名**清掉旧记录，而不是按内容哈希 ----
+            #
+            # 这里踩过一次，后果很隐蔽：原来只按 file_hash 找旧记录，
+            # 而 file_hash 是**文件字节**的指纹。换语料、改解析规则、
+            # 重新生成某个文件之后，字节变了、指纹对不上，
+            # 于是"找不到旧记录"→ 新建一份 → **同名文档在库里出现两份**。
+            #
+            # 表现是检索结果里同一份法规出现两遍，而且两遍的内容还不一样
+            # （一份是旧的、一份是新的）。这比"报错"难查得多。
+            #
+            # 正确的口径是：批量入库时，**（知识库，文件名）才是主键**。
+            # 内容哈希是用来判断"要不要重新处理"的，不是用来判断"这是不是同一份文件"的。
+            for old in service.find_by_filename(
+                filename=path.name, knowledge_base=KNOWLEDGE_BASE
+            ):
                 # 走 delete_document 而不是自己写 delete：
-                # 它会顺手把服务器上的旧源文件也删掉。
-                # 绕开它的话，每重试一次就在 uploads 里多留一份孤儿文件。
-                service.delete_document(existing.id)
+                # 它会顺手删掉向量和服务器上的旧源文件。
+                # 绕开的话，每重试一次就留下一条孤儿向量和一份孤儿文件。
+                service.delete_document(old.id)
 
             # 复制进统一的上传目录，让入库的文件和网页上传的文件
             # 在系统里长得一模一样——删除、重试、重建索引的代码都不用分情况。
