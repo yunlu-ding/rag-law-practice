@@ -87,6 +87,22 @@ COMPILE_SYSTEM_PROMPT = """你在为一份金融监管法规知识库**做索引
 
 5. 维度名要**具体**："罚款幅度"比"处罚"具体，"义务主体"比"主体"具体。
 
+6. **不许写"元数据维度"。** 下面这些一律不要单独成维度：
+
+       "法律效力层级" "适用范围" "发布机关" "文号" "施行日期" "文档信息"
+
+   它们是**文档的属性**，系统里已经结构化存好了（`legal_level` / `validity` /
+   `regulator` / `doc_number` / `effective_date`），根本不是条文内容。
+
+   这一条是被真实失败逼出来的：模型给"法律效力层级"这个维度填的 `original`
+   写成了 **"中华人民共和国证券法（law，effective）"** ——那是系统字段值，
+   不是任何一句原文。它的后果不只是这一行作废，而是**整条词条的
+   `original` 逐字校验通不过**，于是这条词条永远进不了可以作答的状态。
+
+   判断标准很简单：**你写进 `original` 的每一个字，都必须能在
+   我给你的条文原文里连着找到。** 找不到，就说明那不是一个维度，
+   而是一条已经不在这儿的信息。
+
 ## 输出格式
 
 只输出一个 JSON 对象，不要有任何额外文字、不要用 markdown 代码块包裹：
@@ -198,6 +214,39 @@ def _parse_json(raw: str) -> dict[str, Any]:
 
 _ELLIPSIS = re.compile(r'…+|\.{3,}|。{3,}')
 
+# PDF 的分页痕迹。它们会**插在句子中间**，让本来完全正确的引用匹配失败。
+#
+# 实测（这也是写这段的原因）：《证券法》第八十九条被分页切成两片——
+#
+#     chunk 101：……证券公司不能证明的，应当承担相应的—５１—
+#     chunk 102：赔偿责任。
+#
+# 模型引用的是完整的那一句（"应当承担相应的赔偿责任"），**它引对了**，
+# 但两个分句之间横着一个页码和一行页眉，逐字比对必然失败。
+# 于是 model 被记成"引了不存在的原文"，整条词条的 `citation_verified`
+# 变成 False —— 一条内容完全正确的词条，被排版噪声判成了不可信。
+#
+# 所以校验前先把这两类噪声去掉。**这里去掉的只是噪声，不是判断标准**：
+# 真正的底线（"每个字都能在原文里连着找到"）没有放松。
+_PAGE_FURNITURE = (
+    # 页码：全角或半角数字夹在破折号之间，前后可以有空白
+    re.compile(r'[—–\-]\s*[０-９0-9]{1,4}\s*[—–\-]'),
+    # 公报的页眉。这一条是**针对具体语料**的，写在这里是因为
+    # 《国务院公报》那份 PDF 每一页都带这一行，而它恰好落在切页处。
+    # 更正确的修法是在**解析层**去掉页眉页脚（那样所有下游都不用管它），
+    # 但那要重新入库 1281 个切片。先在这里兜住，并把这件事记在已知缺口里。
+    re.compile(r'全国人民代表大会常务委员会公报[０-９0-9·．\.]*'),
+)
+
+
+def _normalize_for_verify(text: str) -> str:
+    """比对前归一化：去空白、去分页噪声。"""
+
+    cleaned = re.sub(r'[\s\u3000]+', '', text or '')
+    for pattern in _PAGE_FURNITURE:
+        cleaned = pattern.sub('', cleaned)
+    return cleaned
+
 
 def verify_originals(
     dimensions: list[dict[str, Any]],
@@ -217,16 +266,16 @@ def verify_originals(
     不用再去翻法规原文，因为原文已经被机器确认过了。
     """
 
-    haystack = re.sub(r'[\s\u3000]+', '', ' '.join(p['text'] for p in passages))
+    haystack = _normalize_for_verify(' '.join(p['text'] for p in passages))
     all_ok = True
 
     for dimension in dimensions:
         for row in dimension.get('rows') or []:
             original = str(row.get('original') or '')
             segments = [
-                re.sub(r'[\s\u3000]+', '', part)
+                _normalize_for_verify(part)
                 for part in _ELLIPSIS.split(original)
-                if len(re.sub(r'[\s\u3000]+', '', part)) >= 4
+                if len(_normalize_for_verify(part)) >= 4
             ]
             row['verified'] = bool(segments) and all(
                 segment in haystack for segment in segments

@@ -48,6 +48,11 @@ def main() -> int:
         action='store_true',
         help='把所有**原文已逐字核实**的词条标记为人工已核对（会逐条列出正在批准什么）',
     )
+    parser.add_argument(
+        '--reverify',
+        action='store_true',
+        help='按当前校验规则重跑已有词条的原文逐字核对（改了校验规则之后用）',
+    )
     args = parser.parse_args()
 
     session_factory = get_session_factory()
@@ -94,6 +99,43 @@ def main() -> int:
                 approved += 1
             session.commit()
             print(f'共批准 {approved} 条')
+
+        if args.reverify:
+            # 改了校验规则之后，**已有词条要按新规则重新过一遍**。
+            #
+            # 为什么必须有这个入口：词条的 `citation_verified` 是**编译那一刻**
+            # 算出来的，写死在库里。校验规则改进之后，老词条身上留着的还是
+            # 旧规则下的结论——实测踩到过：一条内容完全正确的词条，
+            # 因为《证券法》第八十九条被分页切开、页码横在句子中间，
+            # 被旧规则判成"引了不存在的原文"，于是一直不能参与作答。
+            #
+            # 重跑不重新调模型（那会覆盖人工核对过的正文），只重算 `verified`。
+            from app.rag.wiki_compile import load_passages, verify_originals
+
+            for entry in entries:
+                sources: list[tuple[str, str]] = []
+                for item in (entry.compiled_from or {}).get('sources') or []:
+                    # 编译时存的是 "文件名 条款号" 一条字符串，
+                    # 从**右边**按空格切一次就够了——文件名里可能有空格。
+                    filename, _, article = str(item).rpartition(' ')
+                    if filename and article:
+                        sources.append((filename, article))
+                if not sources:
+                    print(f'  跳过（没有编译来源记录）：{entry.title}')
+                    continue
+                passages, missing = load_passages(session, sources)
+                dimensions, all_verified = verify_originals(
+                    list(entry.dimensions or []), passages
+                )
+                before = entry.original_verified
+                entry.dimensions = dimensions
+                entry.original_verified = all_verified
+                entry.citation_verified = all_verified
+                flag = '无变化' if before == all_verified else '**变了**'
+                print(f'  {entry.title}：{before} → {all_verified}（{flag}）')
+                if missing:
+                    print(f'      缺失来源：{missing}')
+            session.commit()
 
         print()
         print(f'{"状态":<10} {"依据核实":<8} {"命中":<5} 词条')

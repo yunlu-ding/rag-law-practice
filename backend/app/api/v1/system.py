@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import os
+from datetime import datetime, timezone
+
 from fastapi import APIRouter
 
 from app.config import Settings, get_settings
 from app.schemas.common import ConfigResponse, DependencyItem, HealthResponse, KnobItem
 
 router = APIRouter(prefix='/system', tags=['system'])
+
+# 进程**载入这份代码**的时刻。
+#
+# 用模块级常量而不是去问系统"进程启动时间"，是因为在这里这两件事等价，
+# 而常量不依赖任何系统接口：模块被导入 = 这份代码被加载，
+# 而配置（.env）也是那一刻读的。uvicorn 没开 --reload 时，模块只在进程启动时导入一次。
+#
+# 启动脚本会拿它跟"磁盘上代码与配置的最后修改时间"比——
+# 比磁盘旧，就说明这是个**陈旧的进程**，它跑的不是你刚改过的代码。
+STARTED_AT = datetime.now(timezone.utc).astimezone().isoformat(timespec='seconds')
 
 
 def _is_configured(value: str | None) -> bool:
@@ -71,6 +84,8 @@ def build_health(settings: Settings) -> HealthResponse:
         app_env=settings.app_env,
         build_stage=settings.build_stage,
         dependencies=dependencies,
+        pid=os.getpid(),
+        started_at=STARTED_AT,
     )
 
 

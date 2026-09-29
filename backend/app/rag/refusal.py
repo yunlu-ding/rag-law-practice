@@ -75,6 +75,17 @@ KIND_RETRIEVAL_ERROR = 'retrieval_error'      # 系统故障，不是知识缺�
 KIND_CITATION_MISSING = 'citation_missing'    # 明确指出条号，库里没有
 KIND_NO_HITS = 'no_hits'                      # 一条都没召回
 KIND_LOW_SCORE = 'low_score'                  # 召回到了但重排分不足
+# 下面这一条**不是我们拒的**，是模型自己看完资料后说"无法判断"。
+#
+# 必须和上面四种分开记，因为它们的性质完全不同：
+#   · 上面四种是**系统**判定"没有依据"，责任在检索和知识边界；
+#   · 这一种是**模型**判定"现有资料不足以回答"，责任在提示词和资料本身。
+#
+# 混在一起的话，"拒答率"这个数字里既有"系统拦下的"也有"模型自己说的"，
+# 而这两种要改的地方根本不是同一处。实测踩到过：15 道边界题里
+# 有 8 道是模型自己拒的，但日志里它们的 `refusal_kind` 都写着 ok——
+# 于是"系统主动拦下几道题"这个指标直接是错的。
+KIND_MODEL_ABSTAIN = 'model_abstain'          # 模型自己说"无法判断"
 
 # 依据的强度，也是给用户看的"这个答案有多硬"。
 EVIDENCE_CITATION = 'citation_exact'   # 关系库按条号精确取出
@@ -268,6 +279,7 @@ __all__ = [
     'EVIDENCE_WIKI',
     'KIND_CITATION_MISSING',
     'KIND_LOW_SCORE',
+    'KIND_MODEL_ABSTAIN',
     'KIND_NO_HITS',
     'KIND_OK',
     'KIND_RETRIEVAL_ERROR',

@@ -235,8 +235,22 @@ def match_entry_with_vector(
     if not is_comparison(query):
         return None
 
+    # ⚠️ 两个条件，缺一不可：
+    #   · status='reviewed'      —— 人工核对过；
+    #   · citation_verified=True —— 每一行引的原文，机器逐字验过。
+    #
+    # 只写第一个条件曾经是个**真实的漏洞**：这段文档一直宣称"只路由
+    # citation_verified=True 的词条"，但代码里只过滤了状态。
+    # 后果是——一条引错了原文的词条，只要被标成 reviewed 就能参与作答，
+    # 而它给出的是一条"看起来有依据"的结论，用户没有办法核对。
+    # 实测里确实存在这样的词条（`securities-vs-futures-suitability`
+    # 因为《证券法》第八十九条被分页切开而被判未核实），
+    # 也就是说：**文档承诺的保证和代码实际做的事，差了整整一个条件。**
     entries = session.execute(
-        select(WikiEntry).where(WikiEntry.status == 'reviewed')
+        select(WikiEntry).where(
+            WikiEntry.status == 'reviewed',
+            WikiEntry.citation_verified.is_(True),
+        )
     ).scalars().all()
     if not entries:
         return None

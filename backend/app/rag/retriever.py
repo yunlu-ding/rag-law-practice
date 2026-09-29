@@ -69,6 +69,9 @@ class RetrievalOutcome:
     sub_queries: list[str] = field(default_factory=list)
     covered_lines: list[str] = field(default_factory=list)
     wiki_entry: dict[str, Any] | None = None
+    # 两条路都空的时候，向量库里到底有多少条。只用于把
+    # "库里真的没有" 和 "检索链路坏了" 分开（见 _flag_silent_empty）。
+    vector_total: int | None = None
 
 
 def retrieve(
@@ -131,6 +134,30 @@ def retrieve(
         outcome.error = (outcome.error or '') + f' 关键词路失败：{type(exc).__name__}: {exc}'
     outcome.timings_ms['bm25'] = int((time.perf_counter() - started) * 1000)
     outcome.bm25_hit_count = len(bm25_hits)
+
+    # ---- 两条路都是 0：必须分辨"真的没有"和"链路有问题" ----
+    #
+    # 这一段是被一次真实故障逼出来的，而且它暴露的是**一类**问题。
+    #
+    # 现象：用户问"证券期货投资者适当性管理办法第二十九条怎么规定的"，
+    # 答案是无法判断。日志里那一次的记录是——
+    #
+    #     向量=0 关键词=0 融合=0 返回=0    error=None
+    #
+    # 三个 0 加上"没有报错"，看起来就是"知识库里没有这个主题"。
+    # 但那个问题不但库里有，而且是**条款直查**能精确命中的一类。
+    # 真正发生的是：那一刻两条检索路都返回了空，**而它们都没报错**。
+    #
+    # 这两件事对用户的意义完全不同：
+    #   · "库里没有"   → 他去补资料（可能补的是一份**已经有了**的文件）；
+    #   · "链路坏了"   → 他重试或去看向量库状态。
+    #
+    # 所以这里要判一次。判据不是"猜"，是用一个**不变量**：
+    # 向量检索那边没有分数下限，**集合非空时余弦检索必然返回 top_k 条**
+    # （唯一的空返回路径是"集合不存在"）。所以
+    # "集合里有 N 条却一条都没召回"在正常情况下不可能发生。
+    if not vector_hits and not bm25_hits:
+        _flag_silent_empty(outcome, db)
 
     # ---- 查询拆分：只用来**扩大候选池** ----
     #
@@ -268,6 +295,72 @@ def retrieve(
         outcome.timings_ms,
     )
     return outcome
+
+
+def _flag_silent_empty(outcome: RetrievalOutcome, db: Session | None) -> None:
+    """两条路都空的时候，判一次"是真没有，还是链路坏了"。
+
+    为什么值得多花一次 RPC：**这两句话给用户的行动指引是相反的。**
+    说"库里没有"，他会去补一份其实已经有的文件；说"链路坏了"，他会重试。
+    而错误的那个说法（"库里可能没有"）恰恰是听起来最合理的那个。
+
+    判据用的是不变量，不是猜测：
+
+      · 向量集合**非空**时，余弦检索必然返回 top_k 条（那边没有分数下限，
+        唯一的空返回路径是"集合不存在"）。所以"有 N 条却召回 0 条"
+        = 链路异常，不可能是"库里没有"。
+      · 向量集合**为空**、而关系库里还有切片，那是**两个库不同步**——
+        同样是系统问题，不是知识缺口，而且它只能靠重建向量库来修。
+
+    这个探测只在"两条路都空"时跑，正常查询一次都不会触发。
+    """
+
+    try:
+        from app.core.vector_store import get_vector_store
+
+        total = get_vector_store().count()
+    except Exception as exc:  # noqa: BLE001
+        # 连探测都失败了 —— 那更说明是链路问题，而不是知识库里没有。
+        logger.exception('[RETRIEVE] 两条路都空，且向量库探测失败')
+        outcome.error = (
+            f'向量库探测失败（{type(exc).__name__}: {exc}）——'
+            f'本次没有召回任何内容，是检索链路的问题，不代表知识库里没有'
+        )
+        return
+
+    outcome.vector_total = total
+
+    if total > 0:
+        outcome.error = (
+            f'向量库里有 {total} 条向量，但本次一条都没召回 —— '
+            f'这是检索链路异常，不是知识库里没有'
+        )
+        logger.error(
+            '[RETRIEVE] 静默空召回: 向量库 %s 条，两条路却都是 0。query=%r',
+            total,
+            outcome.query,
+        )
+        return
+
+    # 向量库是空的。再看关系库有没有切片——有就是"两个库不同步"。
+    if db is None:
+        return
+    try:
+        from sqlalchemy import func, select
+
+        from app.models.chunk import Chunk
+
+        chunks = int(db.execute(select(func.count()).select_from(Chunk)).scalar() or 0)
+    except Exception:  # noqa: BLE001
+        logger.exception('[RETRIEVE] 统计切片数失败')
+        return
+
+    if chunks > 0:
+        outcome.error = (
+            f'关系库里有 {chunks} 个切片，但向量库里一条都没有 —— '
+            f'两个库不同步，需要重建向量库（工具/重建向量库.py）'
+        )
+        logger.error('[RETRIEVE] 向量库为空但关系库有 %s 个切片', chunks)
 
 
 def _try_citation_lookup(

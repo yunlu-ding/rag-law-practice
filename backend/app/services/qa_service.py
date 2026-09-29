@@ -19,7 +19,15 @@ from app.rag.prompts import (
     build_rewrite_prompt,
     build_user_prompt,
 )
-from app.rag.refusal import KIND_RETRIEVAL_ERROR, RefusalDecision, decide
+from app.rag.refusal import (
+    KIND_CITATION_MISSING,
+    KIND_LOW_SCORE,
+    KIND_MODEL_ABSTAIN,
+    KIND_NO_HITS,
+    KIND_RETRIEVAL_ERROR,
+    RefusalDecision,
+    decide,
+)
 from app.services.retrieval_service import RetrievalService
 
 logger = logging.getLogger(__name__)
@@ -266,6 +274,9 @@ class QaService:
         if outcome.conclusion == '无法判断':
             outcome.refused = True
             outcome.refusal_reason = '模型判断现有资料不足以回答'
+            # 给"拒答"补上是**谁**拒的。判据表里那四种是系统拦下的，
+            # 这一种是模型自己说的——混在一起，指标就没法用来定位问题了。
+            outcome.refusal_kind = KIND_MODEL_ABSTAIN
 
         outcome.latency_ms = int((time.perf_counter() - started) * 1000)
         outcome.log_id = self._persist(outcome, threshold)
@@ -401,12 +412,12 @@ def _refusal_message(decision: RefusalDecision) -> str:
             f'如果你认为这部法规应该包含这一条，可以核对一下版本；'
             f'也可以去「文档管理」确认这部法规是否已经入库。'
         )
-    if decision.kind == 'no_hits':
+    if decision.kind == KIND_NO_HITS:
         return (
             '没有检索到与这个问题相关的内容，知识库里可能确实没有这个主题的资料。'
             '可以去「文档管理」确认相关资料是否已经上传入库。'
         )
-    if decision.kind == 'low_score':
+    if decision.kind == KIND_LOW_SCORE:
         return (
             '检索到了内容，但相关度不足，因此不给出结论。'
             '如果你认为资料应该在库里，可以去「检索调试台」看看召回的内容。'

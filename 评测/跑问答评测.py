@@ -51,7 +51,7 @@ OUTPUT_COLUMNS = [
     #   · 依据强度 = degraded 时答案质量天然弱一档，判"引用是否支撑结论"
     #     要把这个前提带上看。
     '是否拒答', '拒答种类', '依据强度', '依据提醒',
-    '系统结论', '系统条款', '系统理由', '引用来源', '错误',
+    '系统结论', '系统条款', '系统理由', '引用条数', '未还原引用', '引用来源', '错误',
     '人工判定[待你填]', '备注[待你填]',
 ]
 
@@ -73,6 +73,27 @@ def main() -> int:
     print()
 
     results: list[dict] = []
+
+    def flush() -> None:
+        """每跑完一题就落盘一次。
+
+        为什么不等跑完再写：这个脚本**每题都在花钱**（一次大模型调用）。
+        实测踩过——跑到第 110 题时因为一个 NameError 崩了，
+        而 `results` 还在内存里，于是**前 110 题的调用费和结果一起没了**，
+        只能从头再跑一遍。
+
+        代价是每写一次整表（120 行，微不足道）。用一点 IO 换"崩了不丢钱"，
+        这笔账没有任何犹豫的余地。
+
+        ⚠️ 用 'w' 覆盖写整表，而不是追加：整表重写天然幂等，
+        跑第二遍不会留下上一遍的残行。
+        """
+
+        with RESULT_FILE.open('w', encoding='utf-8', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=OUTPUT_COLUMNS)
+            writer.writeheader()
+            writer.writerows(results)
+
     session_factory = get_session_factory()
     with session_factory() as session:
         service = QaService(session)
@@ -98,6 +119,13 @@ def main() -> int:
                     '系统结论': outcome.conclusion or '',
                     '系统条款': outcome.clause or '',
                     '系统理由': outcome.reasoning or '',
+                    # 「引用条数」和「未还原引用」这两列是**北极星指标的直接输入**：
+                    #   可信回答率 =（结论正确 **且** 引用确实支撑结论）÷ 总回答数
+                    # 没有引用条数，就分不出"答了但没给依据"（比如跑到境外法规上
+                    # 硬答了 5 句、一条出处都没有）；没有未还原引用，
+                    # 就不知道有没有编造出处。两者都是"可信"这两个字的一半。
+                    '引用条数': len(outcome.citations or []),
+                    '未还原引用': '｜'.join(outcome.unknown_citations or []),
                     '引用来源': citations,
                     '错误': outcome.error or (
                         f'拒答：{outcome.refusal_reason}' if outcome.refused else ''
@@ -109,17 +137,13 @@ def main() -> int:
 
             head = outcome.conclusion or ('拒答' if outcome.refused else '（无结论）')
             print(
-                f'  [{index:>2}/{len(rows)}] {pick(row, "编号"):<7} {head}'
+                f'  [{index:>2}/{len(rows)}] {pick(row, "code"):<7} {head}'
                 f'  ｜ 依据={outcome.evidence or "-"}'
                 + (f' 拒答={outcome.refusal_kind}' if outcome.refused else '')
             )
             if outcome.error:
                 print(f'         ⚠️ {outcome.error[:80]}')
-
-    with RESULT_FILE.open('w', encoding='utf-8', newline='') as handle:
-        writer = csv.DictWriter(handle, fieldnames=OUTPUT_COLUMNS)
-        writer.writeheader()
-        writer.writerows(results)
+            flush()
 
     print()
     print(f'已写入 {RESULT_FILE}')
