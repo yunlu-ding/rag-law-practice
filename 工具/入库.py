@@ -43,6 +43,7 @@ logging.getLogger('pypdf').setLevel(logging.ERROR)
 from sqlalchemy import delete, select  # noqa: E402
 
 from app.core.postgres import get_session_factory  # noqa: E402
+from app.core.vector_store import get_vector_store  # noqa: E402
 from app.models.chunk import Chunk  # noqa: E402
 from app.models.document import Document  # noqa: E402
 from app.rag.metadata import LEGAL_LEVEL_BY_FOLDER, level_label  # noqa: E402
@@ -89,12 +90,34 @@ def iter_corpus() -> list[tuple[str, Path]]:
 
 
 def clear_database(session) -> int:
-    """清空 document 与 chunk（切片随外键级联，但显式删更清楚）。"""
+    """清空关系库里的文档与切片，**同时清掉它们在向量库里的向量**。
+
+    ⚠️ 这里必须显式删向量，不能用裸 SQL 删表了事。
+
+    踩过一次：清完库重新入库之后，向量库里是 2,022 条而实际只需要 1,012 条——
+    每一片都有一份重复。原因是清库只删了关系库，向量库没人管，
+    而新入库的文档拿到了**新的 UUID**，于是"按 document_id 删旧向量"这一步
+    删的是不存在的 ID，旧向量就这么留下来了。
+
+    表现是检索结果里同一条出现两次，而且**不报错**。
+    """
+
+    document_ids = [
+        row[0] for row in session.execute(select(Document.id)).all()
+    ]
+
+    store = get_vector_store()
+    removed_vectors = 0
+    for document_id in document_ids:
+        removed_vectors += store.delete_by_document(document_id)
 
     removed_chunks = session.execute(delete(Chunk)).rowcount
     removed_documents = session.execute(delete(Document)).rowcount
     session.commit()
-    print(f'已清空：{removed_documents} 份文档，{removed_chunks} 个切片')
+    print(
+        f'已清空：{removed_documents} 份文档，{removed_chunks} 个切片，'
+        f'{removed_vectors} 条向量'
+    )
     return removed_documents
 
 
